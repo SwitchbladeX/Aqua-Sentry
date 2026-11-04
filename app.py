@@ -140,11 +140,11 @@ def load_xgboost_model(filename):
         st.warning(f"Model file not found: {filename}")
         return None
 
-do_model = load_xgboost_model("do_model.json")
-temp_model = load_xgboost_model("temp_model.json")
-ph_model = load_xgboost_model("ph_model.json")
-sal_model = load_xgboost_model("salinity_model.json")
-crash_model = load_xgboost_model("crash_model.json")
+do_model = load_xgboost_model("xgb_do_regression_weather_model(FINAL).json")
+temp_model = load_xgboost_model("xgb_temp_C_regression_weather_model(FINAL).json")
+crash_model = load_xgboost_model("xgb_hypoxia_weather_model(FINAL).json")
+ph_model = load_xgboost_model("xgb_pH_regression_weather_model(FINAL).json")
+sal_model = load_xgboost_model("xgb_salinity_PSU_regression_weather_model(FINAL).json")
 
 def predict_model_value(model, vals_dict, weather_dict, horizon, primary_code, base_default):
     base_val = vals_dict.get(primary_code, base_default)
