@@ -146,13 +146,33 @@ crash_model = load_xgboost_model("xgb_hypoxia_weather_model(FINAL).json")
 ph_model = load_xgboost_model("xgb_pH_regression_weather_model(FINAL).json")
 sal_model = load_xgboost_model("xgb_salinity_PSU_regression_weather_model(FINAL).json")
 
-def predict_model_value(model, vals_dict, weather_dict, horizon, primary_code, base_default):
-    base_val = vals_dict.get(primary_code, base_default)
-    air_temp = weather_dict.get('air_temp_C', 15.0)
-    pressure = weather_dict.get('pressure_hPa', 1013.25)
-    wind_speed = weather_dict.get('wind_speed_ms', 3.5)
-    water_temp = vals_dict.get('00010', 18.5)
-    thermal_grad = air_temp - water_temp
+def predict_model_value(model, live_vals, weather_dict, station_id, horizon, primary_code, base_default, is_classifier=False):
+    base_val = live_vals.get(primary_code, base_default)
+    temp = float(live_vals.get('00010', 18.5))
+    do = float(live_vals.get('00300', 6.2)) - (horizon * 0.04 if is_classifier else 0.0)
+    ph = float(live_vals.get('00400', 7.9))
+    sal = float(live_vals.get('00095', 26.5))
+    
+    air_temp = float(weather_dict.get('air_temp_C', 15.0))
+    pressure = float(weather_dict.get('pressure_hPa', 1013.25))
+    wind_speed = float(weather_dict.get('wind_speed_ms', 3.5))
+    thermal_grad = air_temp - temp
+    
+    solubility = 14.6204 - (0.41022 * temp) + (0.007991 * (temp ** 2)) - (0.000077774 * (temp ** 3))
+    deficit = solubility - do
+    
+    hour_val = (pd.Timestamp.now().hour + horizon) % 24
+    sin_hr = np.sin(2 * np.pi * hour_val / 24.0)
+    cos_hr = np.cos(2 * np.pi * hour_val / 24.0)
+    
+    site_mapping = {
+        "01303152": 0,
+        "01297000": 1,
+        "01115000": 2,
+        "01304500": 3,
+        "01305000": 4
+    }
+    site_cat = site_mapping.get(str(station_id), 0)
 
     if model is not None:
         features = getattr(model, "feature_names_in_", None)
@@ -160,35 +180,47 @@ def predict_model_value(model, vals_dict, weather_dict, horizon, primary_code, b
             input_dict = {}
             for f in features:
                 fl = f.lower()
-                if "horizon" in fl or "hour" in fl or "time" in fl:
-                    input_dict[f] = [float(horizon)]
-                elif "air_temp" in fl or "air" in fl:
-                    input_dict[f] = [float(air_temp)]
+                if "temp_c" in fl and "air" not in fl:
+                    input_dict[f] = [temp]
+                elif "do_mgl" in fl or "oxygen" in fl:
+                    input_dict[f] = [do]
+                elif "ph" in fl and "dp_h" not in fl:
+                    input_dict[f] = [ph]
+                elif "salinity" in fl:
+                    input_dict[f] = [sal]
+                elif "air_temp" in fl:
+                    input_dict[f] = [air_temp]
                 elif "pressure" in fl:
-                    input_dict[f] = [float(pressure)]
+                    input_dict[f] = [pressure]
                 elif "wind" in fl:
-                    input_dict[f] = [float(wind_speed)]
+                    input_dict[f] = [wind_speed]
                 elif "thermal" in fl:
-                    input_dict[f] = [float(thermal_grad)]
-                elif "temp" in fl:
-                    input_dict[f] = [float(water_temp)]
-                elif "do" in fl or "oxygen" in fl:
-                    input_dict[f] = [float(vals_dict.get('00300', 6.2))]
-                elif "ph" in fl:
-                    input_dict[f] = [float(vals_dict.get('00400', 7.9))]
-                elif "sal" in fl:
-                    input_dict[f] = [float(vals_dict.get('00095', 26.5))]
+                    input_dict[f] = [thermal_grad]
+                elif "solubility" in fl:
+                    input_dict[f] = [solubility]
+                elif "deficit" in fl:
+                    input_dict[f] = [deficit]
+                elif "sin_hour" in fl:
+                    input_dict[f] = [sin_hr]
+                elif "cos_hour" in fl:
+                    input_dict[f] = [cos_hr]
+                elif "site_code_cat" in fl:
+                    input_dict[f] = [float(site_cat)]
                 else:
-                    input_dict[f] = [float(base_val)]
+                    input_dict[f] = [0.0]
             df_in = pd.DataFrame(input_dict)
-            pred = model.predict(df_in)
-            return float(pred[0])
+            if is_classifier and hasattr(model, "predict_proba"):
+                probs = model.predict_proba(df_in)
+                return float(probs[0][1] * 100.0)
+            else:
+                pred = model.predict(df_in)
+                return float(pred[0])
         else:
-            df_in = pd.DataFrame([[base_val, float(horizon)]], columns=['base_val', 'horizon'])
+            df_in = pd.DataFrame([[base_val]], columns=['base_val'])
             pred = model.predict(df_in)
             return float(pred[0])
     else:
-        raise ValueError(f"Model object for {primary_code} is None. Check model file paths.")
+        raise ValueError("Model object is None.")
 
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Select View", ["Public Forecast and Map", "Farmer and Sensor Dashboard"])
@@ -215,7 +247,7 @@ if page == "Public Forecast and Map":
     st.markdown("---")
     st.subheader("Live Estuary Telemetry Feed & Atmospheric Drivers")
     if not live_df.empty:
-        st.dataframe(live_df, use_container_width=True)
+        st.dataframe(live_df, width='stretch')
         
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         with col_m1:
@@ -234,11 +266,11 @@ if page == "Public Forecast and Map":
     horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 6, key="public_slider")
     
     try:
-        p_do = predict_model_value(do_model, live_vals, weather_vals, horizon, '00300', 6.2)
-        p_temp = predict_model_value(temp_model, live_vals, weather_vals, horizon, '00010', 18.5)
-        p_ph = predict_model_value(ph_model, live_vals, weather_vals, horizon, '00400', 7.9)
-        p_sal = predict_model_value(sal_model, live_vals, weather_vals, horizon, '00095', 26.5)
-        p_risk = min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, horizon, '00300', 10.0)))
+        p_do = predict_model_value(do_model, live_vals, weather_vals, station_id, horizon, '00300', 6.2)
+        p_temp = predict_model_value(temp_model, live_vals, weather_vals, station_id, horizon, '00010', 18.5)
+        p_ph = predict_model_value(ph_model, live_vals, weather_vals, station_id, horizon, '00400', 7.9)
+        p_sal = predict_model_value(sal_model, live_vals, weather_vals, station_id, horizon, '00095', 26.5)
+        p_risk = min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, horizon, '00300', 10.0, is_classifier=True)))
 
         col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
         with col_p1:
@@ -257,23 +289,23 @@ if page == "Public Forecast and Map":
         hours_list = list(range(1, 25))
 
         st.markdown("#### Dissolved Oxygen Model Forecast")
-        do_chart = pd.DataFrame({"Hour": hours_list, "DO (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, h, '00300', 6.2) for h in hours_list]}).set_index("Hour")
+        do_chart = pd.DataFrame({"Hour": hours_list, "DO (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, station_id, h, '00300', 6.2) for h in hours_list]}).set_index("Hour")
         st.line_chart(do_chart)
 
         st.markdown("#### Water Temperature Model Forecast")
-        temp_chart = pd.DataFrame({"Hour": hours_list, "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, h, '00010', 18.5) for h in hours_list]}).set_index("Hour")
+        temp_chart = pd.DataFrame({"Hour": hours_list, "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, station_id, h, '00010', 18.5) for h in hours_list]}).set_index("Hour")
         st.line_chart(temp_chart)
 
         st.markdown("#### pH Model Forecast")
-        ph_chart = pd.DataFrame({"Hour": hours_list, "pH": [predict_model_value(ph_model, live_vals, weather_vals, h, '00400', 7.9) for h in hours_list]}).set_index("Hour")
+        ph_chart = pd.DataFrame({"Hour": hours_list, "pH": [predict_model_value(ph_model, live_vals, weather_vals, station_id, h, '00400', 7.9) for h in hours_list]}).set_index("Hour")
         st.line_chart(ph_chart)
 
         st.markdown("#### Salinity Model Forecast")
-        sal_chart = pd.DataFrame({"Hour": hours_list, "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, h, '00095', 26.5) for h in hours_list]}).set_index("Hour")
+        sal_chart = pd.DataFrame({"Hour": hours_list, "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, station_id, h, '00095', 26.5) for h in hours_list]}).set_index("Hour")
         st.line_chart(sal_chart)
 
         st.markdown("#### Hypoxia Crash Likelihood Classification Model")
-        risk_chart = pd.DataFrame({"Hour": hours_list, "Crash Risk (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, h, '00300', 10.0))) for h in hours_list]}).set_index("Hour")
+        risk_chart = pd.DataFrame({"Hour": hours_list, "Crash Risk (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, h, '00300', 10.0, is_classifier=True))) for h in hours_list]}).set_index("Hour")
         st.line_chart(risk_chart)
 
     except Exception as e:
@@ -296,18 +328,18 @@ elif page == "Farmer and Sensor Dashboard":
         st.markdown("---")
         st.subheader("Live Station Telemetry Summary")
         if not live_df.empty:
-            st.dataframe(live_df, use_container_width=True)
+            st.dataframe(live_df, width='stretch')
 
         st.markdown("---")
         st.subheader("Interactive Predictive Horizon Control")
         farmer_horizon = st.slider("Select Prediction Horizon (Hours Ahead)", 1, 24, 6, key="farmer_slider")
         
         try:
-            f_do = round(predict_model_value(do_model, live_vals, weather_vals, farmer_horizon, '00300', 5.8), 2)
-            f_temp = round(predict_model_value(temp_model, live_vals, weather_vals, farmer_horizon, '00010', 19.2), 2)
-            f_ph = round(predict_model_value(ph_model, live_vals, weather_vals, farmer_horizon, '00400', 7.82), 2)
-            f_sal = round(predict_model_value(sal_model, live_vals, weather_vals, farmer_horizon, '00095', 26.5), 2)
-            f_risk = round(min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, farmer_horizon, '00300', 12.4) * 100.0)), 1)
+            f_do = round(predict_model_value(do_model, live_vals, weather_vals, station_id, farmer_horizon, '00300', 5.8), 2)
+            f_temp = round(predict_model_value(temp_model, live_vals, weather_vals, station_id, farmer_horizon, '00010', 19.2), 2)
+            f_ph = round(predict_model_value(ph_model, live_vals, weather_vals, station_id, farmer_horizon, '00400', 7.82), 2)
+            f_sal = round(predict_model_value(sal_model, live_vals, weather_vals, station_id, farmer_horizon, '00095', 26.5), 2)
+            f_risk = round(min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, farmer_horizon, '00300', 12.4, is_classifier=True))), 1)
             
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
@@ -329,35 +361,35 @@ elif page == "Farmer and Sensor Dashboard":
             st.markdown("#### Dissolved Oxygen Model Forecast")
             do_df = pd.DataFrame({
                 "Hour": hours_list,
-                "Dissolved Oxygen (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, h, '00300', 5.8) for h in hours_list]
+                "Dissolved Oxygen (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, station_id, h, '00300', 5.8) for h in hours_list]
             }).set_index("Hour")
             st.line_chart(do_df)
             
             st.markdown("#### Water Temperature Model Forecast")
             temp_df = pd.DataFrame({
                 "Hour": hours_list,
-                "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, h, '00010', 19.2) for h in hours_list]
+                "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, station_id, h, '00010', 19.2) for h in hours_list]
             }).set_index("Hour")
             st.line_chart(temp_df)
             
             st.markdown("#### pH Model Forecast")
             ph_df = pd.DataFrame({
                 "Hour": hours_list,
-                "pH": [predict_model_value(ph_model, live_vals, weather_vals, h, '00400', 7.82) for h in hours_list]
+                "pH": [predict_model_value(ph_model, live_vals, weather_vals, station_id, h, '00400', 7.82) for h in hours_list]
             }).set_index("Hour")
             st.line_chart(ph_df)
             
             st.markdown("#### Salinity Model Forecast")
             sal_df = pd.DataFrame({
                 "Hour": hours_list,
-                "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, h, '00095', 26.5) for h in hours_list]
+                "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, station_id, h, '00095', 26.5) for h in hours_list]
             }).set_index("Hour")
             st.line_chart(sal_df)
             
             st.markdown("#### Hypoxia Crash Likelihood Classification Model")
             risk_graph_df = pd.DataFrame({
                 "Hour": hours_list,
-                "Crash Probability (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, h, '00300', 12.4) * 100.0)) for h in hours_list]
+                "Crash Probability (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, h, '00300', 12.4, is_classifier=True))) for h in hours_list]
             }).set_index("Hour")
             st.line_chart(risk_graph_df)
             
