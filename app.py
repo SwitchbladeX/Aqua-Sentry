@@ -113,11 +113,6 @@ if page == "Public Forecast and Map":
 
     st.subheader("24-Hour Multi-Parameter AI Forecast Trajectories")
     forecast_hours = list(range(1, 25))
-    forecast_df = pd.DataFrame({
-        "Hour Ahead": forecast_hours,
-        "Dissolved Oxygen Forecast (mg/L)": [6.2 - (0.05 * h) for h in forecast_hours],
-        "Temperature Forecast (C)": [18.5 + (0.1 * np.sin(h/3)) for h in forecast_hours]
-    }).set_Item("Hour Ahead" if "set_Item" else "Hour Ahead")
     
     chart_data = pd.DataFrame({
         "Hour": forecast_hours,
