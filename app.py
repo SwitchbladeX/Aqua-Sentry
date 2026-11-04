@@ -51,34 +51,55 @@ def check_password():
 @st.cache_data(ttl=3600)
 def fetch_usgs_data(station_id):
     url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00300,00010,00095,00400&period=P1D"
+    param_names = {
+        '00300': 'Dissolved Oxygen (mg/L)',
+        '00010': 'Water Temperature (C)',
+        '00400': 'Estuary pH',
+        '00095': 'Salinity / Conductivity'
+    }
+    records = []
+    param_latest = {}
+    try:
+        response = requests.get(url, timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            time_series = data.get('value', {}).get('timeSeries', [])
+            for ts in time_series:
+                var_code_list = ts.get('variable', {}).get('variableCode', [])
+                if var_code_list:
+                    param_code = var_code_list[0].get('value')
+                    param_label = param_names.get(param_code, f"Parameter {param_code}")
+                    values_list = ts.get('values', [{}])[0].get('value', [])
+                    if values_list:
+                        latest_entry = values_list[-1]
+                        val_str = latest_entry.get('value')
+                        if val_str is not None and val_str != '':
+                            val = float(val_str)
+                            param_latest[param_code] = val
+                            records.append({
+                                'Water Quality Parameter': param_label,
+                                'Latest Value': val,
+                                'Timestamp': latest_entry.get('dateTime', '')
+                            })
+    except Exception:
+        pass
+    return pd.DataFrame(records), param_latest
+
+@st.cache_data(ttl=3600)
+def fetch_open_meteo_weather():
+    url = "https://api.open-meteo.com/v1/forecast?latitude=40.87&longitude=-73.53&current=temperature_2m,surface_pressure,wind_speed_10m"
+    weather_vals = {'air_temp_C': 15.0, 'pressure_hPa': 1013.25, 'wind_speed_ms': 3.5}
     try:
         response = requests.get(url, timeout=5)
-        data = response.json()
-        time_series = data['value']['timeSeries']
-        records = []
-        param_names = {
-            '00300': 'Dissolved Oxygen (mg/L)',
-            '00010': 'Water Temperature (C)',
-            '00400': 'Estuary pH',
-            '00095': 'Salinity / Conductivity'
-        }
-        param_latest = {}
-        for ts in time_series:
-            param_code = ts['variable']['variableCode'][0]['value']
-            param_label = param_names.get(param_code, param_code)
-            values = ts['values'][0]['value']
-            if values:
-                latest = values[-1]
-                val = float(latest['value']) if latest['value'] else 0.0
-                records.append({
-                    'Water Quality Parameter': param_label,
-                    'Latest Value': val,
-                    'Timestamp': latest['dateTime']
-                })
-                param_latest[param_code] = val
-        return pd.DataFrame(records), param_latest
+        if response.status_code == 200:
+            data = response.json()
+            current = data.get('current', {})
+            weather_vals['air_temp_C'] = float(current.get('temperature_2m', 15.0))
+            weather_vals['pressure_hPa'] = float(current.get('surface_pressure', 1013.25))
+            weather_vals['wind_speed_ms'] = float(current.get('wind_speed_10m', 3.5))
     except Exception:
-        return pd.DataFrame(), {}
+        pass
+    return weather_vals
 
 def load_xgboost_model(filename):
     if os.path.exists(filename):
@@ -101,7 +122,13 @@ ph_model = load_xgboost_model("ph_model.json")
 sal_model = load_xgboost_model("salinity_model.json")
 crash_model = load_xgboost_model("crash_model.json")
 
-def predict_value(model, base_val, horizon, default_drop=0.05):
+def predict_model_value(model, vals_dict, weather_dict, horizon, primary_code):
+    base_val = vals_dict.get(primary_code, 6.0)
+    air_temp = weather_dict.get('air_temp_C', 15.0)
+    pressure = weather_dict.get('pressure_hPa', 1013.25)
+    wind_speed = weather_dict.get('wind_speed_ms', 3.5)
+    thermal_grad = air_temp - vals_dict.get('00010', 15.0)
+
     if model is not None:
         try:
             features = getattr(model, "feature_names_in_", None)
@@ -110,9 +137,25 @@ def predict_value(model, base_val, horizon, default_drop=0.05):
                 for f in features:
                     fl = f.lower()
                     if "horizon" in fl or "hour" in fl or "time" in fl:
-                        input_dict[f] = [horizon]
+                        input_dict[f] = [float(horizon)]
+                    elif "air_temp" in fl or "air" in fl:
+                        input_dict[f] = [float(air_temp)]
+                    elif "pressure" in fl:
+                        input_dict[f] = [float(pressure)]
+                    elif "wind" in fl:
+                        input_dict[f] = [float(wind_speed)]
+                    elif "thermal" in fl:
+                        input_dict[f] = [float(thermal_grad)]
+                    elif "temp" in fl:
+                        input_dict[f] = [float(vals_dict.get('00010', base_val))]
+                    elif "do" in fl or "oxygen" in fl:
+                        input_dict[f] = [float(vals_dict.get('00300', base_val))]
+                    elif "ph" in fl:
+                        input_dict[f] = [float(vals_dict.get('00400', base_val))]
+                    elif "sal" in fl:
+                        input_dict[f] = [float(vals_dict.get('00095', base_val))]
                     else:
-                        input_dict[f] = [base_val]
+                        input_dict[f] = [float(base_val)]
                 df_in = pd.DataFrame(input_dict)
                 pred = model.predict(df_in)
                 return float(pred[0])
@@ -122,7 +165,7 @@ def predict_value(model, base_val, horizon, default_drop=0.05):
                 return float(pred[0])
         except Exception:
             pass
-    return float(base_val - (default_drop * horizon))
+    return float(base_val)
 
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Select View", ["Public Forecast and Map", "Farmer and Sensor Dashboard"])
@@ -143,52 +186,52 @@ if page == "Public Forecast and Map":
     station_id = stations[selected_station_name]
     
     live_df, live_vals = fetch_usgs_data(station_id)
+    weather_vals = fetch_open_meteo_weather()
     
-    base_do = live_vals.get('00300', 6.2)
-    base_temp = live_vals.get('00010', 18.5)
-    base_ph = live_vals.get('00400', 7.9)
-    base_sal = live_vals.get('00095', 26.5)
-
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1:
-        st.metric(label="Dissolved Oxygen", value=f"{base_do:.2f} mg/L")
-    with col_m2:
-        st.metric(label="Water Temperature", value=f"{base_temp:.2f} C")
-    with col_m3:
-        st.metric(label="Estuary pH", value=f"{base_ph:.2f}")
-    with col_m4:
-        st.metric(label="Salinity", value=f"{base_sal:.2f} PSU")
-        
     st.markdown("---")
-    st.subheader("Live Estuary Telemetry Feed")
+    st.subheader("Live Estuary Telemetry Feed & Atmospheric Drivers")
     if not live_df.empty:
         st.dataframe(live_df, use_container_width=True)
+        
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        with col_m1:
+            st.metric(label="Dissolved Oxygen", value=f"{live_vals.get('00300', 'N/A')} mg/L" if '00300' in live_vals else "Not Reported")
+        with col_m2:
+            st.metric(label="Water Temp", value=f"{live_vals.get('00010', 'N/A')} C" if '00010' in live_vals else "Not Reported")
+        with col_m3:
+            st.metric(label="Estuary pH", value=f"{live_vals.get('00400', 'N/A')}" if '00400' in live_vals else "Not Reported")
+        with col_m4:
+            st.metric(label="Salinity", value=f"{live_vals.get('00095', 'N/A')} PSU" if '00095' in live_vals else "Not Reported")
+        with col_m5:
+            st.metric(label="Air Temp (Open-Meteo)", value=f"{weather_vals.get('air_temp_C', 'N/A')} C")
     else:
-        st.info("Syncing real-time instantaneous values from USGS monitoring station...")
+        st.warning("Selected station did not return real-time parameters. Please select another USGS node.")
 
-    st.subheader("Interactive 24-Hour Forecast Horizon Selector")
-    horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 6, key="public_slider")
-    
-    pred_do = predict_value(do_model, base_do, horizon, 0.04)
-    pred_temp = predict_value(temp_model, base_temp, horizon, -0.05)
-    
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        st.metric(label=f"Predicted DO ({horizon}h Ahead)", value=f"{pred_do:.2f} mg/L")
-    with col_p2:
-        st.metric(label=f"Predicted Temperature ({horizon}h Ahead)", value=f"{pred_temp:.2f} C")
+    if live_vals:
+        st.markdown("---")
+        st.subheader("Interactive 24-Hour Forecast Horizon Selector")
+        horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 6, key="public_slider")
+        
+        pred_do = predict_model_value(do_model, live_vals, weather_vals, horizon, '00300')
+        pred_temp = predict_model_value(temp_model, live_vals, weather_vals, horizon, '00010')
+        
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            st.metric(label=f"Predicted DO ({horizon}h Ahead)", value=f"{pred_do:.2f} mg/L")
+        with col_p2:
+            st.metric(label=f"Predicted Temperature ({horizon}h Ahead)", value=f"{pred_temp:.2f} C")
 
-    all_hours = list(range(1, 25))
-    do_traj = [predict_value(do_model, base_do, h, 0.04) for h in all_hours]
-    chart_df = pd.DataFrame({
-        "Hour Ahead": all_hours,
-        "Dissolved Oxygen Forecast (mg/L)": do_traj
-    }).set_index("Hour Ahead")
-    st.line_chart(chart_df)
+        all_hours = list(range(1, 25))
+        do_traj = [predict_model_value(do_model, live_vals, weather_vals, h, '00300') for h in all_hours]
+        chart_df = pd.DataFrame({
+            "Hour Ahead": all_hours,
+            "Dissolved Oxygen Forecast (mg/L)": do_traj
+        }).set_index("Hour Ahead")
+        st.line_chart(chart_df)
 
 elif page == "Farmer and Sensor Dashboard":
     st.title("Restricted IoT and Live Sensor Dashboard")
-    st.write("Secure telemetry pipeline streaming directly from custom ESP32 dock nodes and executing XGBoost predictive models.")
+    st.write("Secure telemetry pipeline streaming directly from custom ESP32 dock nodes and executing weather-aware XGBoost predictive models.")
     
     if check_password():
         st.success("Access Granted. Authorized farmer telemetry online.")
@@ -196,21 +239,24 @@ elif page == "Farmer and Sensor Dashboard":
         selected_station_name = st.selectbox("Select Active Telemetry Station", list(stations.keys()), key="farmer_station")
         station_id = stations[selected_station_name]
         live_df, live_vals = fetch_usgs_data(station_id)
+        weather_vals = fetch_open_meteo_weather()
         
-        node_do = live_vals.get('00300', 5.8)
-        node_temp = live_vals.get('00010', 19.2)
-        node_ph = live_vals.get('00400', 7.82)
-        node_sal = live_vals.get('00095', 26.5)
-        
+        st.markdown("---")
+        st.subheader("Live Station Telemetry Summary")
+        if not live_df.empty:
+            st.dataframe(live_df, use_container_width=True)
+        else:
+            st.warning("No active parameters returned from this station.")
+
         st.markdown("---")
         st.subheader("Interactive Predictive Horizon Control")
         farmer_horizon = st.slider("Select Prediction Horizon (Hours Ahead)", 1, 24, 6, key="farmer_slider")
         
-        f_do = round(predict_value(do_model, node_do, farmer_horizon, 0.06), 2)
-        f_temp = round(predict_value(temp_model, node_temp, farmer_horizon, -0.05), 2)
-        f_ph = round(predict_value(ph_model, node_ph, farmer_horizon, 0.015), 2)
-        f_sal = round(predict_value(sal_model, node_sal, farmer_horizon, -0.02), 2)
-        f_risk = round(min(100.0, max(0.0, predict_value(crash_model, 12.4, farmer_horizon, -2.1))), 1)
+        f_do = round(predict_model_value(do_model, live_vals, weather_vals, farmer_horizon, '00300'), 2)
+        f_temp = round(predict_model_value(temp_model, live_vals, weather_vals, farmer_horizon, '00010'), 2)
+        f_ph = round(predict_model_value(ph_model, live_vals, weather_vals, farmer_horizon, '00400'), 2)
+        f_sal = round(predict_model_value(sal_model, live_vals, weather_vals, farmer_horizon, '00095'), 2)
+        f_risk = round(min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, farmer_horizon, '00300') * 100.0)), 1)
         
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
@@ -232,28 +278,28 @@ elif page == "Farmer and Sensor Dashboard":
         st.markdown("#### Dissolved Oxygen Model Forecast (R2 = 0.9721)")
         do_df = pd.DataFrame({
             "Hour": hours_list,
-            "Dissolved Oxygen (mg/L)": [predict_value(do_model, node_do, h, 0.06) for h in hours_list]
+            "Dissolved Oxygen (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, h, '00300') for h in hours_list]
         }).set_index("Hour")
         st.line_chart(do_df)
         
         st.markdown("#### Water Temperature Model Forecast (R2 = 0.9917)")
         temp_df = pd.DataFrame({
             "Hour": hours_list,
-            "Temperature (C)": [predict_value(temp_model, node_temp, h, -0.05) for h in hours_list]
+            "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, h, '00010') for h in hours_list]
         }).set_index("Hour")
         st.line_chart(temp_df)
         
         st.markdown("#### pH Model Forecast (R2 = 0.9480)")
         ph_df = pd.DataFrame({
             "Hour": hours_list,
-            "pH": [predict_value(ph_model, node_ph, h, 0.015) for h in hours_list]
+            "pH": [predict_model_value(ph_model, live_vals, weather_vals, h, '00400') for h in hours_list]
         }).set_index("Hour")
         st.line_chart(ph_df)
         
         st.markdown("#### Salinity Model Forecast (R2 = 0.8260)")
         sal_df = pd.DataFrame({
             "Hour": hours_list,
-            "Salinity (PSU)": [predict_value(sal_model, node_sal, h, -0.02) for h in hours_list]
+            "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, h, '00095') for h in hours_list]
         }).set_index("Hour")
         st.line_chart(sal_df)
         
@@ -261,7 +307,7 @@ elif page == "Farmer and Sensor Dashboard":
         st.subheader("Hypoxia Crash Likelihood Classification Model")
         risk_graph_df = pd.DataFrame({
             "Hour": hours_list,
-            "Crash Probability (%)": [min(100.0, max(0.0, predict_value(crash_model, 12.4, h, -2.1))) for h in hours_list]
+            "Crash Probability (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, h, '00300') * 100.0)) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(risk_graph_df)
         
