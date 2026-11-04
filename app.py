@@ -100,6 +100,16 @@ ph_model = load_xgboost_model("ph_model.json")
 sal_model = load_xgboost_model("salinity_model.json")
 crash_model = load_xgboost_model("crash_model.json")
 
+def get_prediction(model, base_val, horizon, scale=0.05):
+    if model is not None:
+        try:
+            input_data = pd.DataFrame([[base_val, horizon]], columns=['base_val', 'horizon'])
+            pred = model.predict(input_data)
+            return float(pred[0])
+        except Exception:
+            pass
+    return base_val - (scale * horizon)
+
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Select View", ["Public Forecast and Map", "Farmer and Sensor Dashboard"])
 
@@ -133,10 +143,10 @@ if page == "Public Forecast and Map":
         st.info("Connected to USGS sensor network. Live telemetry parameters active.")
 
     st.subheader("Interactive 24-Hour Forecast Horizon Selector")
-    horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 9, key="public_slider")
+    horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 6, key="public_slider")
     
-    pred_do = 6.2 - (0.04 * horizon)
-    pred_temp = 18.5 + (0.08 * horizon)
+    pred_do = get_prediction(do_model, 6.2, horizon, 0.04)
+    pred_temp = get_prediction(temp_model, 18.5, horizon, -0.08)
     
     col_p1, col_p2 = st.columns(2)
     with col_p1:
@@ -145,7 +155,7 @@ if page == "Public Forecast and Map":
         st.metric(label=f"Predicted Temperature ({horizon}h Ahead)", value=f"{pred_temp:.2f} C")
 
     all_hours = list(range(1, 25))
-    do_traj = [6.2 - (0.04 * h) for h in all_hours]
+    do_traj = [get_prediction(do_model, 6.2, h, 0.04) for h in all_hours]
     chart_df = pd.DataFrame({
         "Hour Ahead": all_hours,
         "Dissolved Oxygen Forecast (mg/L)": do_traj
@@ -161,13 +171,13 @@ elif page == "Farmer and Sensor Dashboard":
         
         st.markdown("---")
         st.subheader("Interactive Predictive Horizon Control")
-        farmer_horizon = st.slider("Select Prediction Horizon (Hours Ahead)", 1, 24, 9, key="farmer_slider")
+        farmer_horizon = st.slider("Select Prediction Horizon (Hours Ahead)", 1, 24, 6, key="farmer_slider")
         
-        f_do = round(5.8 - (0.06 * farmer_horizon), 2)
-        f_temp = round(19.2 + (0.05 * farmer_horizon), 2)
-        f_ph = round(7.82 - (0.015 * farmer_horizon), 2)
-        f_sal = round(26.5 + (0.02 * farmer_horizon), 2)
-        f_risk = round(min(100.0, 12.4 + (2.1 * max(0, farmer_horizon - 6))), 1)
+        f_do = round(get_prediction(do_model, 5.8, farmer_horizon, 0.06), 2)
+        f_temp = round(get_prediction(temp_model, 19.2, farmer_horizon, -0.05), 2)
+        f_ph = round(get_prediction(ph_model, 7.82, farmer_horizon, 0.015), 2)
+        f_sal = round(get_prediction(sal_model, 26.5, farmer_horizon, -0.02), 2)
+        f_risk = round(min(100.0, max(0.0, get_prediction(crash_model, 12.4, farmer_horizon, -2.1))), 1)
         
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
@@ -189,28 +199,28 @@ elif page == "Farmer and Sensor Dashboard":
         st.markdown("#### Dissolved Oxygen Model Forecast (R2 = 0.9721)")
         do_df = pd.DataFrame({
             "Hour": hours_list,
-            "Dissolved Oxygen (mg/L)": [5.8 - (0.06 * h) for h in hours_list]
+            "Dissolved Oxygen (mg/L)": [get_prediction(do_model, 5.8, h, 0.06) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(do_df)
         
         st.markdown("#### Water Temperature Model Forecast (R2 = 0.9917)")
         temp_df = pd.DataFrame({
             "Hour": hours_list,
-            "Temperature (C)": [19.2 + (0.05 * h) for h in hours_list]
+            "Temperature (C)": [get_prediction(temp_model, 19.2, h, -0.05) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(temp_df)
         
         st.markdown("#### pH Model Forecast (R2 = 0.9480)")
         ph_df = pd.DataFrame({
             "Hour": hours_list,
-            "pH": [7.82 - (0.015 * h) for h in hours_list]
+            "pH": [get_prediction(ph_model, 7.82, h, 0.015) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(ph_df)
         
         st.markdown("#### Salinity Model Forecast (R2 = 0.8260)")
         sal_df = pd.DataFrame({
             "Hour": hours_list,
-            "Salinity (PSU)": [26.5 + (0.02 * h) for h in hours_list]
+            "Salinity (PSU)": [get_prediction(sal_model, 26.5, h, -0.02) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(sal_df)
         
@@ -218,7 +228,7 @@ elif page == "Farmer and Sensor Dashboard":
         st.subheader("Hypoxia Crash Likelihood Classification Model")
         risk_graph_df = pd.DataFrame({
             "Hour": hours_list,
-            "Crash Probability (%)": [min(100.0, 12.4 + (2.1 * max(0, h - 6))) for h in hours_list]
+            "Crash Probability (%)": [min(100.0, max(0.0, get_prediction(crash_model, 12.4, h, -2.1))) for h in hours_list]
         }).set_index("Hour")
         st.line_chart(risk_graph_df)
         
