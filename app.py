@@ -84,7 +84,7 @@ if page == "Public Forecast and Map":
     st.subheader("Regional 24-Hour Water Trajectories")
     dummy_hours = list(range(24))
     dummy_do = [6.5 - (0.1 * i) + (0.05 * np.sin(i)) for i in dummy_hours]
-    chart_data = pd.DataFrame({"Hour Ahead": dummy_hours, Predicted DO (mg/L): dummy_do})
+    chart_data = pd.DataFrame({"Hour Ahead": dummy_hours, "Predicted DO (mg/L)": dummy_do})
     st.line_chart(chart_data, x="Hour Ahead", y="Predicted DO (mg/L)")
 
 elif page == "Farmer and Sensor Dashboard":
@@ -128,4 +128,3 @@ elif page == "Farmer and Sensor Dashboard":
         
         st.markdown("---")
         st.subheader("ESP32 Hardware Node Diagnostics")
-        st.write("Sensor Status: Online | Wi-Fi Signal: -62 dBm | MicroSD Local Backup: Synchronized")
