@@ -236,8 +236,8 @@ except Exception as e:
     st.stop()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Oyster Farmer Settings")
-farmer_sensitivity = st.sidebar.slider("Risk Sensitivity Multiplier", 1.0, 2.0, 1.2, 0.1)
+st.sidebar.subheader("Farmer Settings")
+crash_threshold = st.sidebar.slider("Crash Threshold Probability (%)", 10.0, 90.0, 30.0, 5.0)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Admin Testing Portal")
@@ -250,10 +250,10 @@ if admin_pass == "admin123":
     sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
     show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
     if sim_mode:
-        sim_do = st.sidebar.slider("Simulate Crash Baseline DO (mg/L)", 1.0, 12.0, 2.5)
-        sim_temp = st.sidebar.slider("Simulate Crash Baseline Temp (°C)", 5.0, 35.0, 29.0)
-        sim_ph = st.sidebar.slider("Simulate Crash Baseline pH", 5.0, 10.0, 7.1)
-        sim_sal = st.sidebar.slider("Simulate Crash Baseline Salinity", 0.0, 40.0, 12.0)
+        sim_do = st.sidebar.slider("Simulate Crash Past DO (mg/L)", 1.0, 12.0, 2.5)
+        sim_temp = st.sidebar.slider("Simulate Crash Past Temp (°C)", 5.0, 35.0, 29.0)
+        sim_ph = st.sidebar.slider("Simulate Crash Past pH", 5.0, 10.0, 7.1)
+        sim_sal = st.sidebar.slider("Simulate Crash Past Salinity", 0.0, 40.0, 12.0)
         
         station_history_df["DO_mgL"] = sim_do
         station_history_df["temp_C"] = sim_temp
@@ -284,7 +284,7 @@ else:
     raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
 raw_hypoxia_probs = pd.Series(raw_hypoxia_probs).rolling(window=3, min_periods=1, center=True).mean().values
-hypoxia_percentages = np.clip(raw_hypoxia_probs * 100.0 * farmer_sensitivity, 0.0, 100.0)
+hypoxia_percentages = raw_hypoxia_probs * 100.0
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Forecast Time Control")
@@ -333,7 +333,7 @@ with tab5:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)', line=dict(color='#3b82f6', width=3)))
     fig.add_scatter(x=[forecast_hours[selected_hour]], y=[hypoxia_percentages[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.add_hline(y=30.0, line_dash="dash", line_color="#ef4444", annotation_text="Crash Threshold (30%)", annotation_position="top right")
+    fig.add_hline(y=crash_threshold, line_dash="dash", line_color="#ef4444", annotation_text=f"Crash Threshold ({crash_threshold:.0f}%)", annotation_position="top right")
     fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
