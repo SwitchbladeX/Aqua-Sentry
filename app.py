@@ -68,6 +68,14 @@ def load_all_models():
             
     return models
 
+def convert_conductance_to_salinity(cond):
+    if cond <= 0:
+        return 0.0
+    r = cond / 53087.0
+    sal = (0.0080 - (0.1692 * np.sqrt(r)) + (25.3851 * r) + 
+           (14.0941 * (r**1.5)) - (7.0261 * (r**2)) + (2.7081 * (r**2.5)))
+    return float(np.clip(sal, 0.0, 40.0))
+
 def fetch_usgs_station_history(station_id, days=3):
     url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00010,00300,00400,00095&period=P{days}D"
     response = requests.get(url)
@@ -102,8 +110,44 @@ def fetch_usgs_station_history(station_id, days=3):
     if not dfs:
         raise ValueError(f"Failed to parse time series parameters for station {station_id}")
         
-    combined_df = pd.concat(dfs, axis=1).sort_index().ffill().bfill().dropna()
-    return combined_df
+    combined_df = pd.concat(dfs, axis=1).sort_index().ffill().bfill()
+    
+    if "salinity_PSU" in combined_df.columns:
+        if combined_df["salinity_PSU"].mean() > 100:
+            combined_df["salinity_PSU"] = combined_df["salinity_PSU"].apply(convert_conductance_to_salinity)
+            
+    required_cols = ["temp_C", "DO_mgL", "pH", "salinity_PSU"]
+    for col in required_cols:
+        if col not in combined_df.columns:
+            combined_df[col] = 0.0
+            
+    return combined_df.dropna(subset=["DO_mgL", "temp_C"])
+
+def compute_wqi(do, temp, ph, salinity):
+    sub_do = 100.0 if do >= 5.0 else max(0.0, (do / 5.0) * 100.0)
+    
+    if 15.0 <= temp <= 25.0:
+        sub_temp = 100.0
+    elif temp < 15.0:
+        sub_temp = max(0.0, (temp / 15.0) * 100.0)
+    else:
+        sub_temp = max(0.0, 100.0 - ((temp - 25.0) / 10.0) * 100.0)
+        
+    if 7.5 <= ph <= 8.5:
+        sub_ph = 100.0
+    else:
+        dev = min(abs(ph - 7.5), abs(ph - 8.5))
+        sub_ph = max(0.0, 100.0 - (dev / 1.5) * 100.0)
+        
+    if 15.0 <= salinity <= 30.0:
+        sub_sal = 100.0
+    elif salinity < 15.0:
+        sub_sal = max(0.0, (salinity / 15.0) * 100.0)
+    else:
+        sub_sal = max(0.0, 100.0 - ((salinity - 30.0) / 10.0) * 100.0)
+        
+    wqi = (sub_do * 0.40) + (sub_temp * 0.20) + (sub_ph * 0.20) + (sub_sal * 0.20)
+    return float(np.clip(wqi, 0.0, 100.0))
 
 def align_and_predict(model, input_df):
     booster = model.get_booster()
@@ -203,31 +247,32 @@ except Exception as e:
 st.title("Long Island Estuary Water Quality Portal")
 st.markdown("##### Advanced XGBoost Forecasting & Hypoxia Early Warning System")
 
-station_candidates = {
-    "Station 01304500 (Western Long Island Sound - Pelham)": "01304500",
-    "Station 01304200 (Western Long Island Sound - Execution Rocks)": "01304200",
-    "Station 01193050 (Connecticut River Estuary)": "01193050",
-    "Station 01311143 (Jamaica Bay Estuary)": "01311143",
-    "Station 01302020 (Hudson River Estuary)": "01302020",
-    "Station 01305500 (Housatonic River Basin)": "01305500",
-    "Station 01304650 (East River Estuary Node)": "01304650",
-    "Station 01302250 (Upper New York Harbor)": "01302250"
+station_metadata = {
+    "Station 01304500 (Pelham Bay - Western LI Sound Estuary)": {"id": "01304500", "type": "Estuary"},
+    "Station 01304200 (Execution Rocks - Open Sound Estuary)": {"id": "01304200", "type": "Estuary"},
+    "Station 01193050 (Connecticut River Estuary Transition)": {"id": "01193050", "type": "Tidal River"},
+    "Station 01311143 (Jamaica Bay Estuary Node)": {"id": "01311143", "type": "Estuary"},
+    "Station 01302020 (Hudson River at Piermont Pier)": {"id": "01302020", "type": "Tidal River"},
+    "Station 01305500 (Housatonic River at Stratford)": {"id": "01305500", "type": "Riverine"},
+    "Station 01304650 (Throgs Neck - East River Node)": {"id": "01304650", "type": "Estuary"},
+    "Station 01302250 (Upper New York Harbor - Battery Terminal)": {"id": "01302250", "type": "Harbor"}
 }
 
 valid_stations = {}
-for name, sid in station_candidates.items():
+for name, meta in station_metadata.items():
     try:
-        fetch_usgs_station_history(sid, days=1)
-        valid_stations[name] = sid
+        fetch_usgs_station_history(meta["id"], days=1)
+        valid_stations[name] = meta
     except Exception:
         pass
 
 if not valid_stations:
-    st.error("No active stations found reporting all required parameters.")
+    st.error("No active stations found reporting required parameters.")
     st.stop()
 
 selected_station_name = st.sidebar.selectbox("Select Validated Station", list(valid_stations.keys()))
-selected_station_id = valid_stations[selected_station_name]
+selected_meta = valid_stations[selected_station_name]
+selected_station_id = selected_meta["id"]
 
 try:
     station_history_df = fetch_usgs_station_history(selected_station_id, days=3)
@@ -290,16 +335,32 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Forecast Time Control")
 selected_hour = st.sidebar.slider("Advance Forecast Horizon (Hours)", min_value=0, max_value=23, value=0, step=1)
 
+wqi_score = compute_wqi(pred_dos[selected_hour], pred_temps[selected_hour], pred_phs[selected_hour], pred_salts[selected_hour])
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Selected Hour Telemetry (+{}h)".format(selected_hour))
 st.sidebar.metric(label="Forecasted DO", value=f"{pred_dos[selected_hour]:.2f} mg/L")
 st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} °C")
 st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
 st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
+st.sidebar.metric(label="Water Quality Index (WQI)", value=f"{wqi_score:.0f} / 100")
 st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
 
 if show_raw_prob:
     st.sidebar.metric(label="Raw Model Probability", value=f"{raw_hypoxia_probs[selected_hour]:.6f}")
+
+wqi_col1, wqi_col2 = st.columns([1, 3])
+with wqi_col1:
+    st.metric(label="Public Water Quality Index (WQI)", value=f"{wqi_score:.0f} / 100", delta=selected_meta["type"])
+with wqi_col2:
+    if wqi_score >= 80:
+        st.success("WQI Status: Excellent — Optimal conditions for estuarine life & shellfisheries.")
+    elif wqi_score >= 50:
+        st.warning("WQI Status: Fair — Moderate stress detected; monitor parameters closely.")
+    elif wqi_score >= 30:
+        st.warning("WQI Status: Stressed — Water quality parameters degrading.")
+    else:
+        st.error("WQI Status: Critical — High threat of environmental hypoxia crash.")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
 
