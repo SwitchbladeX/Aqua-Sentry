@@ -57,7 +57,7 @@ def load_all_models():
     models = {}
     model_paths = {
         'DO_mgL': 'xgb_do_regression_weather_model(FINAL) (1).json',
-        'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
+        'temp_C': 'xgb_temp_C_regression_weather_model(FINAL) (1).json',
         'pH': 'xgb_pH_regression_model(FINAL) (1).json',
         'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL) (1).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
