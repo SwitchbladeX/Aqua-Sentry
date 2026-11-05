@@ -4,7 +4,7 @@ import numpy as np
 import xgboost as xgb
 import plotly.graph_objects as go
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
 st.set_page_config(
     page_title="Long Island Oyster AI Portal",
@@ -26,7 +26,7 @@ def load_all_models():
     model_paths = {
         'DO_mgL': 'xgb_do_regression_weather_model(FINAL).json',
         'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
-        'pH': 'xgb_pH_regression_weather_model(FINAL).json',
+        'pH': 'xgb_pH_regression_model(FINAL).json',
         'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
     }
