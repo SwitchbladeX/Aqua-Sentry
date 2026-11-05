@@ -175,11 +175,31 @@ except Exception as e:
     st.error(f"Failed to fetch live USGS data: {e}")
     st.stop()
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("Admin Testing Portal")
+admin_pass = st.sidebar.text_input("Enter Admin Passcode", type="password")
+
+simulated_do = current_readings["00300"]
+simulated_temp = current_readings["00010"]
+simulated_ph = current_readings["00400"]
+simulated_sal = current_readings["00095"]
+show_raw_prob = False
+
+if admin_pass == "admin123":
+    st.sidebar.success("Admin Mode Active")
+    sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
+    show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
+    if sim_mode:
+        simulated_do = st.sidebar.slider("Simulated DO (mg/L)", 1.0, 12.0, float(current_readings["00300"]))
+        simulated_temp = st.sidebar.slider("Simulated Temp (°C)", 5.0, 35.0, float(current_readings["00010"]))
+        simulated_ph = st.sidebar.slider("Simulated pH", 5.0, 10.0, float(current_readings["00400"]))
+        simulated_sal = st.sidebar.slider("Simulated Salinity (PSU)", 0.0, 40.0, float(current_readings["00095"]))
+
 base_df = pd.DataFrame([{
-    "temp_C": current_readings["00010"],
-    "DO_mgL": current_readings["00300"],
-    "pH": current_readings["00400"],
-    "salinity_PSU": current_readings["00095"]
+    "temp_C": simulated_temp,
+    "DO_mgL": simulated_do,
+    "pH": simulated_ph,
+    "salinity_PSU": simulated_sal
 }])
 
 forecast_df = generate_forecast_features(base_df.iloc[0].to_dict(), hours=24)
@@ -218,6 +238,9 @@ st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_h
 st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
 st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
 st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
+
+if show_raw_prob:
+    st.sidebar.metric(label="Raw Model Probability", value=f"{raw_hypoxia_probs[selected_hour]:.6f}")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
 
