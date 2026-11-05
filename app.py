@@ -83,15 +83,44 @@ def align_and_predict_proba(model, input_df):
         input_df = input_df[feature_names]
     return model.predict_proba(input_df)
 
-def generate_forecast_features(base_features, hours=24):
+def generate_forecast_features(base_features, hours=24, site_cat_id=0):
     future_rows = []
     current_time = datetime.datetime.now()
     
-    # Extract baseline values
     base_temp = base_features.get("temp_C", 20.0)
     base_do = base_features.get("do_mg_l", 8.0)
     base_pH = base_features.get("pH", 7.8)
     base_sal = base_features.get("salinity_PSU", 25.0)
+    
+    for i in range(hours):
+        step_time = current_time + datetime.timedelta(hours=i)
+        hour_of_day = step_time.hour
+        
+        # Diurnal estuarine temperature swing approximation
+        temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
+        
+        # Exact thermodynamic formula from your training notebook
+        do_solubility = 14.6204 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
+        do_deficit = max(0.0, do_solubility - base_do)
+        
+        row = {
+            'temp_C': temp_est,
+            'DO_mgL': base_do,
+            'pH': base_pH,
+            'salinity_PSU': base_sal,
+            'dDO_dt_3h': 0.0,
+            'dDO_dt_6h': 0.0,
+            'dDO_acceleration': 0.0,
+            'DO_solubility_sat': do_solubility,
+            'DO_deficit': do_deficit,
+            'sin_hour': np.sin(2 * np.pi * hour_of_day / 24.0),
+            'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
+            'site_code_cat': site_cat_id
+        }
+        
+        future_rows.append(row)
+        
+    return pd.DataFrame(future_rows)
     
     for i in range(hours):
         step_time = current_time + datetime.timedelta(hours=i)
