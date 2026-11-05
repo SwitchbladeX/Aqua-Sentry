@@ -24,10 +24,10 @@ STATIONS = {
 def load_all_models():
     models = {}
     model_paths = {
-        'DO_mgL': 'xgb_do_regression_weather_model(FINAL).json',
+        'DO_mgL': 'xgb_do_regression_weather_model(FINAL) (1).json',
         'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
-        'pH': 'xgb_pH_regression_model(FINAL).json',
-        'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL).json',
+        'pH': 'xgb_pH_regression_model(FINAL) (1).json',
+        'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL) (1).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
     }
     
@@ -170,18 +170,12 @@ for h in horizons:
 hypoxia_prob = 0.0
 if models['hypoxia'] is not None:
     try:
-        clf_features = input_features.drop(columns=['horizon'])
         if hasattr(models['hypoxia'], 'feature_names_in_'):
             expected_features = models['hypoxia'].feature_names_in_
-            clf_features_aligned = pd.DataFrame(columns=expected_features)
-            for col in expected_features:
-                if col in clf_features.columns:
-                    clf_features_aligned[col] = clf_features[col]
-                else:
-                    clf_features_aligned[col] = 0.0
-            hypoxia_prob = models['hypoxia'].predict_proba(clf_features_aligned)[0][1]
+            clf_features = input_features[expected_features]
         else:
-            hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
+            clf_features = input_features.drop(columns=['horizon'], errors='ignore')
+        hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
     except Exception:
         hypoxia_prob = 0.0
 
@@ -201,22 +195,22 @@ with tab1:
     fig_do.add_trace(go.Scatter(x=horizons, y=forecasts['DO_mgL'], mode='lines+markers', name='Predicted DO (mg/L)', line=dict(color='#008080', width=3)))
     fig_do.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Hypoxia Threshold")
     fig_do.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Dissolved Oxygen (mg/L)", height=400)
-    st.plotly_chart(fig_do, use_container_width=True)
+    st.plotly_chart(fig_do, width='stretch')
 
 with tab2:
     fig_temp = go.Figure()
     fig_temp.add_trace(go.Scatter(x=horizons, y=forecasts['temp_C'], mode='lines+markers', name='Predicted Temp (°C)', line=dict(color='#FF4B4B', width=3)))
     fig_temp.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Water Temperature (°C)", height=400)
-    st.plotly_chart(fig_temp, use_container_width=True)
+    st.plotly_chart(fig_temp, width='stretch')
 
 with tab3:
     fig_ph = go.Figure()
     fig_ph.add_trace(go.Scatter(x=horizons, y=forecasts['pH'], mode='lines+markers', name='Predicted pH', line=dict(color='#9B59B6', width=3)))
     fig_ph.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="pH Level", height=400)
-    st.plotly_chart(fig_ph, use_container_width=True)
+    st.plotly_chart(fig_ph, width='stretch')
 
 with tab4:
     fig_sal = go.Figure()
     fig_sal.add_trace(go.Scatter(x=horizons, y=forecasts['salinity_PSU'], mode='lines+markers', name='Predicted Salinity (PSU)', line=dict(color='#3498DB', width=3)))
     fig_sal.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Salinity (PSU)", height=400)
-    st.plotly_chart(fig_sal, use_container_width=True)
+    st.plotly_chart(fig_sal, width='stretch')
