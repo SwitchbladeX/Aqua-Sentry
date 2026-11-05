@@ -11,7 +11,6 @@ st.set_page_config(page_title="Long Island Estuary Water Quality Portal", layout
 
 @st.cache_resource
 def load_all_models():
-    # Load all trained regression and classification XGBoost model artifacts
     models = {}
     model_files = {
         "do": "xgb_do_regression_weather_model(FINAL) (1).json",
@@ -37,7 +36,6 @@ def load_all_models():
     return models
 
 def fetch_usgs_station_history(station_id, days=3):
-    # Fetch multi-day historical telemetry from USGS Instantaneous Values API
     url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00010,00300,00400,00095&period=P{days}D"
     response = requests.get(url)
     if response.status_code != 200:
@@ -75,7 +73,6 @@ def fetch_usgs_station_history(station_id, days=3):
     return combined_df
 
 def align_and_predict(model, input_df):
-    # Align DataFrame columns with model feature specifications for regression
     booster = model.get_booster()
     feature_names = booster.feature_names
     if feature_names:
@@ -86,7 +83,6 @@ def align_and_predict(model, input_df):
     return model.predict(input_df)
 
 def align_and_predict_proba(model, input_df):
-    # Align DataFrame columns with model feature specifications for classification
     booster = model.get_booster()
     feature_names = booster.feature_names
     if feature_names:
@@ -97,14 +93,12 @@ def align_and_predict_proba(model, input_df):
     return model.predict_proba(input_df)
 
 def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0):
-    # Extract historical derivatives and rolling statistics from real USGS telemetry
     last_row = history_df.iloc[-1]
     base_temp = last_row["temp_C"]
     base_do = last_row["DO_mgL"]
     base_pH = last_row["pH"]
     base_sal = last_row["salinity_PSU"]
     
-    # Calculate exact rate of change metrics from 15-minute historical sampling intervals
     dDO_1h = history_df["DO_mgL"].diff(4).iloc[-1] if len(history_df) >= 4 else 0.0
     dDO_3h = history_df["DO_mgL"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
     dDO_6h = history_df["DO_mgL"].diff(24).iloc[-1] if len(history_df) >= 24 else 0.0
@@ -116,7 +110,6 @@ def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0)
     
     dDO_accel = dDO_3h - (dDO_6h / 2.0)
     
-    # Calculate actual rolling volatility from historical telemetry window
     do_std_12h = history_df["DO_mgL"].rolling(48, min_periods=1).std().iloc[-1]
     do_std_24h = history_df["DO_mgL"].rolling(96, min_periods=1).std().iloc[-1]
     ph_std_24h = history_df["pH"].rolling(96, min_periods=1).std().iloc[-1]
@@ -129,10 +122,7 @@ def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0)
         hour_of_day = step_time.hour
         day_of_year = step_time.timetuple().tm_yday
         
-        # Diurnal temperature cycle approximation
         temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        
-        # Exact thermodynamic equations matching model training script
         do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
         do_deficit = max(0.0, do_solubility - base_do)
         do_sat_ratio = base_do / (do_solubility + 1e-5)
@@ -177,6 +167,7 @@ except Exception as e:
     st.stop()
 
 st.title("Long Island Estuary Water Quality Portal")
+st.markdown("Advanced XGBoost Forecasting & Hypoxia Early Warning System for Estuarine Monitoring")
 
 station_candidates = {
     "Station 01304500 (Western Long Island Sound - Pelham)": "01304500",
@@ -229,10 +220,11 @@ if admin_pass == "admin123":
 
 forecast_df = generate_forecast_features_from_history(station_history_df, hours=24)
 
-pred_temps = align_and_predict(models["temp"], forecast_df.copy())
-pred_dos = align_and_predict(models["do"], forecast_df.copy())
-pred_phs = align_and_predict(models["pH"], forecast_df.copy())
-pred_salts = align_and_predict(models["salinity"], forecast_df.copy())
+# Apply rolling smoothing to regression predictions to eliminate jagged tree thresholds
+pred_temps = pd.Series(align_and_predict(models["temp"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
+pred_dos = pd.Series(align_and_predict(models["do"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
+pred_phs = pd.Series(align_and_predict(models["pH"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
+pred_salts = pd.Series(align_and_predict(models["salinity"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
 
 forecast_df_hypoxia = forecast_df.copy()
 forecast_df_hypoxia["temp_C"] = pred_temps
@@ -250,6 +242,8 @@ if hasattr(models["hypoxia"], "predict_proba"):
 else:
     raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
+# Smooth classification probabilities using a 3-hour moving average to ensure realistic physical continuity
+raw_hypoxia_probs = pd.Series(raw_hypoxia_probs).rolling(window=3, min_periods=1, center=True).mean().values
 hypoxia_percentages = raw_hypoxia_probs * 100.0
 
 st.sidebar.markdown("---")
@@ -259,7 +253,7 @@ selected_hour = st.sidebar.slider("Advance Forecast Horizon (Hours)", min_value=
 st.sidebar.markdown("---")
 st.sidebar.subheader("Selected Hour Telemetry (+{}h)".format(selected_hour))
 st.sidebar.metric(label="Forecasted DO", value=f"{pred_dos[selected_hour]:.2f} mg/L")
-st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} °C")
+st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} C")
 st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
 st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
 st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
@@ -278,7 +272,7 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (°C)"}, title="Water Temperature 24-Hour Trajectory")
+    fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (C)"}, title="Water Temperature 24-Hour Trajectory")
     fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_temps[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
     fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
@@ -304,18 +298,42 @@ with tab5:
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
-st.subheader("Estuary Parameter Guidelines & Oyster Health Reference")
-st.markdown("""
-* **Dissolved Oxygen (DO):** 
-  * **Safe / Fine:** Above 5.0 mg/L. Oysters breathe comfortably and maintain metabolic activity.
-  * **Hazardous / Bad:** Below 3.0 mg/L. Induces severe hypoxia, metabolic stress, and potential mortality if prolonged.
-* **Water Temperature:** 
-  * **Safe / Fine:** 15°C to 25°C. Optimal feeding and growth range for *Crassostrea virginica*.
-  * **Hazardous / Bad:** Above 28°C. Drastically increases oxygen consumption rates while lowering dissolved oxygen solubility in water.
-* **pH Levels:**
-  * **Safe / Fine:** 7.5 to 8.5. Supports normal shell calcification and larval development.
-  * **Hazardous / Bad:** Below 7.3. Acidic conditions weaken oyster shells and hinder growth.
-* **Salinity:**
-  * **Safe / Fine:** 15 to 30 PSU. Standard estuarine brackish comfort zone.
-  * **Hazardous / Bad:** Sudden drops below 10 PSU due to heavy freshwater runoff can cause osmotic shock.
-""")
+st.subheader("Estuary Parameter Threshold Reference")
+
+col_a, col_b, col_c, col_d = st.columns(4)
+
+with col_a:
+    st.markdown("""
+    <div style="background-color: #d4edda; padding: 15px; border-radius: 5px; border-left: 5px solid #28a745;">
+        <h4 style="color: #155724; margin-top: 0;">Dissolved Oxygen</h4>
+        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> >= 5.0 mg/L</p>
+        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful (Hypoxic):</b> < 3.0 mg/L</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_b:
+    st.markdown("""
+    <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; border-left: 5px solid #ffc107;">
+        <h4 style="color: #856404; margin-top: 0;">Water Temperature</h4>
+        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 15.0C - 25.0C</p>
+        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful:</b> > 28.0C</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_c:
+    st.markdown("""
+    <div style="background-color: #d1ecf1; padding: 15px; border-radius: 5px; border-left: 5px solid #17a2b8;">
+        <h4 style="color: #0c5460; margin-top: 0;">pH Levels</h4>
+        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 7.5 - 8.5</p>
+        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful (Acidic):</b> < 7.3</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_d:
+    st.markdown("""
+    <div style="background-color: #f8d7da; padding: 15px; border-radius: 5px; border-left: 5px solid #dc3545;">
+        <h4 style="color: #721c24; margin-top: 0;">Salinity</h4>
+        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 15 - 30 PSU</p>
+        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful:</b> < 10 PSU</p>
+    </div>
+    """, unsafe_allow_html=True)
