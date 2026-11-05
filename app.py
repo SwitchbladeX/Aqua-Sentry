@@ -160,22 +160,39 @@ for h in horizons:
         'horizon': float(h)
     }])
 
-    for param in forecasts.keys():
-        if models[param] is not None:
-            pred = models[param].predict(input_features)[0]
-            forecasts[param].append(pred)
-        else:
-            forecasts[param].append(telemetry[param])
+    for param, model in models.items():
+        if param in forecasts and model is not None:
+            try:
+                if hasattr(model, 'feature_names_in_'):
+                    expected_features = model.feature_names_in_
+                    aligned_features = pd.DataFrame(columns=expected_features)
+                    for col in expected_features:
+                        if col in input_features.columns:
+                            aligned_features[col] = input_features[col]
+                        else:
+                            aligned_features[col] = 0.0
+                    pred = model.predict(aligned_features)[0]
+                else:
+                    pred = model.predict(input_features)[0]
+                forecasts[param].append(pred)
+            except Exception:
+                forecasts[param].append(telemetry[param])
 
 hypoxia_prob = 0.0
 if models['hypoxia'] is not None:
     try:
+        clf_features = input_features.drop(columns=['horizon'], errors='ignore')
         if hasattr(models['hypoxia'], 'feature_names_in_'):
             expected_features = models['hypoxia'].feature_names_in_
-            clf_features = input_features[expected_features]
+            clf_features_aligned = pd.DataFrame(columns=expected_features)
+            for col in expected_features:
+                if col in clf_features.columns:
+                    clf_features_aligned[col] = clf_features[col]
+                else:
+                    clf_features_aligned[col] = 0.0
+            hypoxia_prob = models['hypoxia'].predict_proba(clf_features_aligned)[0][1]
         else:
-            clf_features = input_features.drop(columns=['horizon'], errors='ignore')
-        hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
+            hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
     except Exception:
         hypoxia_prob = 0.0
 
