@@ -14,27 +14,52 @@ st.set_page_config(
 st.title("Long Island Oyster AI Portal")
 st.markdown("Estuary telemetry and machine learning water quality forecasting system protecting Crassostrea virginica.")
 
-STATIONS = {
-    "West Harbor at Oyster Bay (USGS 01303152)": {
-        "site_code": "01303152", 
-        "lat": 40.875, 
-        "lon": -73.535
-    },
-    "Western Long Island Sound Node (USGS 01304500)": {
-        "site_code": "01304500", 
-        "lat": 40.850, 
-        "lon": -73.650
-    }
+CANDIDATE_STATIONS = {
+    "West Harbor at Oyster Bay": {"site_code": "01303152", "lat": 40.875, "lon": -73.535},
+    "Western Long Island Sound": {"site_code": "01304500", "lat": 40.850, "lon": -73.650},
+    "Great South Bay Near Patchogue": {"site_code": "01305000", "lat": 40.650, "lon": -73.250},
+    "Central Long Island Sound": {"site_code": "01115000", "lat": 41.150, "lon": -72.650},
+    "Hudson River at Battery": {"site_code": "01164500", "lat": 40.700, "lon": -74.015},
+    "East River at Wards Island": {"site_code": "01302020", "lat": 40.783, "lon": -73.916},
+    "Jamaica Bay": {"site_code": "01311143", "lat": 40.633, "lon": -73.816},
+    "Nissequogue River": {"site_code": "01303500", "lat": 40.891, "lon": -73.216}
 }
+
+@st.cache_data(ttl=3600)
+def validate_stations(stations_dict):
+    valid = {}
+    for name, info in stations_dict.items():
+        url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={info['site_code']}&parameterCd=00010,00300,00400,00095&siteStatus=all"
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200 and response.text.strip():
+                data = response.json()
+                series = data.get('value', {}).get('timeSeries', [])
+                found_params = set()
+                for s in series:
+                    p_code = s.get('variable', {}).get('variableCode', [{}])[0].get('value')
+                    if p_code in ['00010', '00300', '00400', '00095']:
+                        found_params.add(p_code)
+                if len(found_params) == 4:
+                    valid[name] = info
+        except Exception:
+            pass
+    return valid
+
+STATIONS = validate_stations(CANDIDATE_STATIONS)
+
+if not STATIONS:
+    st.error("No stations currently returning all required parameters.")
+    st.stop()
 
 @st.cache_resource
 def load_all_models():
     models = {}
     model_paths = {
         'DO_mgL': 'xgb_do_regression_weather_model(FINAL) (1).json',
-        'temp_C': 'xgb_temp_C_regression_weather_model(FINAL) (1).json',
-        'pH': 'xgb_pH_regression_weather_model(FINAL) (1).json',
-        'salinity_PSU': 'xgb_salinity_PSU_regression_weather_model(FINAL) (1).json',
+        'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
+        'pH': 'xgb_pH_regression_model(FINAL) (1).json',
+        'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL) (1).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
     }
     
