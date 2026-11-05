@@ -65,6 +65,17 @@ def fetch_live_usgs_telemetry(site_code):
             latest_val = float(values[-1]['value'])
             latest_vals[param_code] = latest_val
             
+    required_params = {
+        '00010': 'Water Temperature (00010)',
+        '00300': 'Dissolved Oxygen (00300)',
+        '00400': 'pH (00400)',
+        '00095': 'Salinity/Conductivity (00095)'
+    }
+    
+    missing = [name for code, name in required_params.items() if code not in latest_vals]
+    if missing:
+        raise ValueError(f"USGS feed for station {site_code} is missing required parameters: {', '.join(missing)}")
+        
     return {
         'temp_C': latest_vals['00010'],
         'DO_mgL': latest_vals['00300'],
