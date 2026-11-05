@@ -15,9 +15,16 @@ st.title("Long Island Oyster AI Portal")
 st.markdown("Estuary telemetry and machine learning water quality forecasting system protecting Crassostrea virginica.")
 
 STATIONS = {
-    "Great South Bay Node (USGS 01305000)": {"site_code": "01305000", "lat": 40.65, "lon": -73.25},
-    "Western Long Island Sound (USGS 01304500)": {"site_code": "01304500", "lat": 40.85, "lon": -73.65},
-    "Central Long Island Sound (USGS 01115000)": {"site_code": "01115000", "lat": 41.15, "lon": -72.65}
+    "West Harbor at Oyster Bay (USGS 01303152)": {
+        "site_code": "01303152", 
+        "lat": 40.875, 
+        "lon": -73.535
+    },
+    "Western Long Island Sound Node (USGS 01304500)": {
+        "site_code": "01304500", 
+        "lat": 40.850, 
+        "lon": -73.650
+    }
 }
 
 @st.cache_resource
