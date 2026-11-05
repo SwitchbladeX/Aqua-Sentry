@@ -88,7 +88,7 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
     current_time = datetime.datetime.now()
     
     base_temp = base_features.get("temp_C", 20.0)
-    base_do = base_features.get("do_mg_l", 8.0)
+    base_do = base_features.get("DO_mgL", 8.0)
     base_pH = base_features.get("pH", 7.8)
     base_sal = base_features.get("salinity_PSU", 25.0)
     
@@ -96,10 +96,7 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
         step_time = current_time + datetime.timedelta(hours=i)
         hour_of_day = step_time.hour
         
-        # Diurnal estuarine temperature swing approximation
         temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        
-        # Exact thermodynamic formula from your training notebook
         do_solubility = 14.6204 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
         do_deficit = max(0.0, do_solubility - base_do)
         
@@ -117,43 +114,6 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
             'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
             'site_code_cat': site_cat_id
         }
-        
-        future_rows.append(row)
-        
-    return pd.DataFrame(future_rows)
-    
-    for i in range(hours):
-        step_time = current_time + datetime.timedelta(hours=i)
-        hour_of_day = step_time.hour
-        day_of_year = step_time.timetuple().tm_yday
-        
-        # Approximate diurnal temperature swing (+/- 1.5 C peak in afternoon)
-        temp_est = base_temp + 1.5 * np.sin(2 * np.pi * (hour_of_day - 6) / 24)
-        
-        # Simplified standard freshwater/estuarine DO solubility formula (mg/L)
-        do_solubility = 14.62 - 0.41022 * temp_est + 0.007991 * (temp_est**2) - 0.000077774 * (temp_est**3)
-        do_deficit = max(0.0, do_solubility - base_do)
-        
-        row = base_features.copy()
-        row["temp_C"] = temp_est
-        row["hour"] = hour_of_day
-        row["day_of_year"] = day_of_year
-        row["sin_hour"] = np.sin(2 * np.pi * hour_of_day / 24)
-        row["cos_hour"] = np.cos(2 * np.pi * hour_of_day / 24)
-        row["sin_day"] = np.sin(2 * np.pi * day_of_year / 365)
-        row["cos_day"] = np.cos(2 * np.pi * day_of_year / 365)
-        
-        # Populate thermodynamic and kinetic placeholders to prevent zero-padding saturation
-        row["DO_solubility_sat"] = do_solubility
-        row["DO_deficit"] = do_deficit
-        row["dDO_dt_3h"] = 0.0  # Steady-state assumption for live streaming inference
-        row["dDO_dt_6h"] = 0.0
-        row["dDO_acceleration"] = 0.0
-        row["air_temp_C"] = temp_est + 2.0
-        row["pressure_hPa"] = 1013.25
-        row["wind_speed_ms"] = 3.5
-        row["thermal_gradient"] = 0.5
-        row["site_code_cat"] = 0
         
         future_rows.append(row)
         
@@ -200,7 +160,7 @@ except Exception as e:
 
 base_df = pd.DataFrame([{
     "temp_C": current_readings["00010"],
-    "do_mg_l": current_readings["00300"],
+    "DO_mgL": current_readings["00300"],
     "pH": current_readings["00400"],
     "salinity_PSU": current_readings["00095"]
 }])
@@ -214,14 +174,24 @@ pred_salts = align_and_predict(models["salinity"], forecast_df.copy())
 
 forecast_df_hypoxia = forecast_df.copy()
 forecast_df_hypoxia["temp_C"] = pred_temps
-forecast_df_hypoxia["do_mg_l"] = pred_dos
+forecast_df_hypoxia["DO_mgL"] = pred_dos
 forecast_df_hypoxia["pH"] = pred_phs
 forecast_df_hypoxia["salinity_PSU"] = pred_salts
+forecast_df_hypoxia["DO_solubility_sat"] = 14.6204 - 0.41022 * pred_temps + 0.007991 * (pred_temps**2) - 0.000077774 * (pred_temps**3)
+forecast_df_hypoxia["DO_deficit"] = np.maximum(0.0, forecast_df_hypoxia["DO_solubility_sat"] - pred_dos)
 
 if hasattr(models["hypoxia"], "predict_proba"):
-    pred_hypoxia = align_and_predict_proba(models["hypoxia"], forecast_df_hypoxia)[:, 1]
+    raw_hypoxia_probs = align_and_predict_proba(models["hypoxia"], forecast_df_hypoxia)[:, 1]
 else:
-    pred_hypoxia = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
+    raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
+
+hypoxia_percentages = raw_hypoxia_probs * 100.0
+max_hypoxia_pct = float(np.max(hypoxia_percentages))
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Estuary Risk Metrics")
+st.sidebar.metric(label="Peak Hypoxia Risk (24h)", value=f"{max_hypoxia_pct:.1f}%", delta="Threshold: 30.0%" if max_hypoxia_pct >= 30.0 else "Normal Range", delta_color="inverse" if max_hypoxia_pct >= 30.0 else "normal")
+st.sidebar.slider("Hypoxia Crash Probability (%)", min_value=0.0, max_value=100.0, value=max_hypoxia_pct, disabled=True)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
 
@@ -229,23 +199,44 @@ forecast_hours = [f"+{i}h" for i in range(24)]
 
 with tab1:
     fig = px.line(x=forecast_hours, y=pred_dos, labels={"x": "Forecast Horizon", "y": "Dissolved Oxygen (mg/L)"}, title="Dissolved Oxygen 24-Hour Trajectory")
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (°C)"}, title="Water Temperature 24-Hour Trajectory")
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab3:
     fig = px.line(x=forecast_hours, y=pred_phs, labels={"x": "Forecast Horizon", "y": "pH"}, title="pH 24-Hour Trajectory")
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab4:
     fig = px.line(x=forecast_hours, y=pred_salts, labels={"x": "Forecast Horizon", "y": "Salinity (PSU)"}, title="Salinity 24-Hour Trajectory")
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab5:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=forecast_hours, y=pred_hypoxia, mode='lines+markers', name='Hypoxia Probability'))
-    fig.add_hline(y=0.30, line_dash="dash", line_color="red", annotation_text="Crash Threshold (0.30)", annotation_position="top right")
-    fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability", title="Hypoxia Crash Probability (Classifier)")
+    fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)'))
+    fig.add_hline(y=30.0, line_dash="dash", line_color="red", annotation_text="Crash Threshold (30%)", annotation_position="top right")
+    fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage")
     st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("---")
+st.subheader("Estuary Parameter Guidelines & Oyster Health Reference")
+st.markdown("""
+* **Dissolved Oxygen (DO):** 
+  * **Safe / Fine:** Above 5.0 mg/L. Oysters breathe comfortably and maintain metabolic activity.
+  * **Hazardous / Bad:** Below 3.0 mg/L. Induces severe hypoxia, metabolic stress, and potential mortality if prolonged. This is the core threshold tracked by the classifier.
+* **Water Temperature:** 
+  * **Safe / Fine:** 15°C to 25°C. Optimal feeding and growth range for *Crassostrea virginica*.
+  * **Hazardous / Bad:** Above 28°C. Drastically increases oxygen consumption rates while lowering dissolved oxygen solubility in water.
+* **pH Levels:**
+  * **Safe / Fine:** 7.5 to 8.5. Supports normal shell calcification and larval development.
+  * **Hazardous / Bad:** Below 7.3. Acidic conditions weaken oyster shells and hinder growth.
+* **Salinity:**
+  * **Safe / Fine:** 15 to 30 PSU. Standard estuarine brackish comfort zone.
+  * **Hazardous / Bad:** Sudden drops below 10 PSU due to heavy freshwater runoff can cause osmotic shock.
+""")
