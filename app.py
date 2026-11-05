@@ -87,18 +87,44 @@ def generate_forecast_features(base_features, hours=24):
     future_rows = []
     current_time = datetime.datetime.now()
     
+    # Extract baseline values
+    base_temp = base_features.get("temp_C", 20.0)
+    base_do = base_features.get("do_mg_l", 8.0)
+    base_pH = base_features.get("pH", 7.8)
+    base_sal = base_features.get("salinity_PSU", 25.0)
+    
     for i in range(hours):
         step_time = current_time + datetime.timedelta(hours=i)
         hour_of_day = step_time.hour
         day_of_year = step_time.timetuple().tm_yday
         
+        # Approximate diurnal temperature swing (+/- 1.5 C peak in afternoon)
+        temp_est = base_temp + 1.5 * np.sin(2 * np.pi * (hour_of_day - 6) / 24)
+        
+        # Simplified standard freshwater/estuarine DO solubility formula (mg/L)
+        do_solubility = 14.62 - 0.41022 * temp_est + 0.007991 * (temp_est**2) - 0.000077774 * (temp_est**3)
+        do_deficit = max(0.0, do_solubility - base_do)
+        
         row = base_features.copy()
+        row["temp_C"] = temp_est
         row["hour"] = hour_of_day
         row["day_of_year"] = day_of_year
         row["sin_hour"] = np.sin(2 * np.pi * hour_of_day / 24)
         row["cos_hour"] = np.cos(2 * np.pi * hour_of_day / 24)
         row["sin_day"] = np.sin(2 * np.pi * day_of_year / 365)
         row["cos_day"] = np.cos(2 * np.pi * day_of_year / 365)
+        
+        # Populate thermodynamic and kinetic placeholders to prevent zero-padding saturation
+        row["DO_solubility_sat"] = do_solubility
+        row["DO_deficit"] = do_deficit
+        row["dDO_dt_3h"] = 0.0  # Steady-state assumption for live streaming inference
+        row["dDO_dt_6h"] = 0.0
+        row["dDO_acceleration"] = 0.0
+        row["air_temp_C"] = temp_est + 2.0
+        row["pressure_hPa"] = 1013.25
+        row["wind_speed_ms"] = 3.5
+        row["thermal_gradient"] = 0.5
+        row["site_code_cat"] = 0
         
         future_rows.append(row)
         
