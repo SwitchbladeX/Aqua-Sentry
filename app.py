@@ -26,8 +26,18 @@ st.markdown("""
         color: #ffffff;
     }
     
-    [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stSubheader, [data-testid="stSidebar"] .stMarkdown {
-        color: #f1f5f9 !important;
+    [data-testid="stSidebar"] label, 
+    [data-testid="stSidebar"] .stSubheader, 
+    [data-testid="stSidebar"] .stMarkdown,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div {
+        color: #ffffff !important;
+    }
+    
+    [data-testid="stSidebar"] .stTextInput input,
+    [data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] {
+        color: #000000 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -115,17 +125,12 @@ def align_and_predict_proba(model, input_df):
         input_df = input_df[feature_names]
     return model.predict_proba(input_df)
 
-def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0, sim_targets=None):
+def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0):
     last_row = history_df.iloc[-1]
     base_temp = last_row["temp_C"]
     base_do = last_row["DO_mgL"]
     base_pH = last_row["pH"]
     base_sal = last_row["salinity_PSU"]
-    
-    target_temp = sim_targets.get("temp_C", base_temp) if sim_targets else base_temp
-    target_do = sim_targets.get("DO_mgL", base_do) if sim_targets else base_do
-    target_pH = sim_targets.get("pH", base_pH) if sim_targets else base_pH
-    target_sal = sim_targets.get("salinity_PSU", base_sal) if sim_targets else base_sal
     
     dDO_1h = history_df["DO_mgL"].diff(4).iloc[-1] if len(history_df) >= 4 else 0.0
     dDO_3h = history_df["DO_mgL"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
@@ -150,24 +155,19 @@ def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0,
         hour_of_day = step_time.hour
         day_of_year = step_time.timetuple().tm_yday
         
-        progress = i / max(1, hours - 1)
+        temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
         
-        est_temp = base_temp + (target_temp - base_temp) * progress + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        est_do = base_do + (target_do - base_do) * progress
-        est_pH = base_pH + (target_pH - base_pH) * progress
-        est_sal = base_sal + (target_sal - base_sal) * progress
-        
-        do_solubility = 14.652 - (0.41022 * est_temp) + (0.007991 * (est_temp**2)) - (0.000077774 * (est_temp**3))
-        do_deficit = max(0.0, do_solubility - est_do)
-        do_sat_ratio = est_do / (do_solubility + 1e-5)
-        do_pH_ratio = est_do / (est_pH + 1e-5)
-        do_temp_ratio = est_do / (est_temp + 1e-5)
+        do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
+        do_deficit = max(0.0, do_solubility - base_do)
+        do_sat_ratio = base_do / (do_solubility + 1e-5)
+        do_pH_ratio = base_do / (base_pH + 1e-5)
+        do_temp_ratio = base_do / (temp_est + 1e-5)
         
         row = {
-            'temp_C': est_temp,
-            'DO_mgL': est_do,
-            'pH': est_pH,
-            'salinity_PSU': est_sal,
+            'temp_C': temp_est,
+            'DO_mgL': base_do,
+            'pH': base_pH,
+            'salinity_PSU': base_sal,
             'dDO_dt_1h': 0.0 if pd.isna(dDO_1h) else dDO_1h,
             'dDO_dt_3h': 0.0 if pd.isna(dDO_3h) else dDO_3h,
             'dDO_dt_6h': 0.0 if pd.isna(dDO_6h) else dDO_6h,
@@ -236,26 +236,31 @@ except Exception as e:
     st.stop()
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("Oyster Farmer Settings")
+farmer_sensitivity = st.sidebar.slider("Risk Sensitivity Multiplier", 1.0, 2.0, 1.2, 0.1)
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("Admin Testing Portal")
 admin_pass = st.sidebar.text_input("Enter Admin Passcode", type="password")
 
 show_raw_prob = False
-sim_targets = None
 
 if admin_pass == "admin123":
     st.sidebar.success("Admin Mode Active")
     sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
     show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
     if sim_mode:
-        last_row = station_history_df.iloc[-1]
-        sim_targets = {
-            "DO_mgL": st.sidebar.slider("Simulated Target DO (mg/L)", 1.0, 12.0, float(last_row["DO_mgL"])),
-            "temp_C": st.sidebar.slider("Simulated Target Temp (°C)", 5.0, 35.0, float(last_row["temp_C"])),
-            "pH": st.sidebar.slider("Simulated Target pH", 5.0, 10.0, float(last_row["pH"])),
-            "salinity_PSU": st.sidebar.slider("Simulated Target Salinity (PSU)", 0.0, 40.0, float(last_row["salinity_PSU"]))
-        }
+        sim_do = st.sidebar.slider("Simulate Crash Baseline DO (mg/L)", 1.0, 12.0, 2.5)
+        sim_temp = st.sidebar.slider("Simulate Crash Baseline Temp (°C)", 5.0, 35.0, 29.0)
+        sim_ph = st.sidebar.slider("Simulate Crash Baseline pH", 5.0, 10.0, 7.1)
+        sim_sal = st.sidebar.slider("Simulate Crash Baseline Salinity", 0.0, 40.0, 12.0)
+        
+        station_history_df["DO_mgL"] = sim_do
+        station_history_df["temp_C"] = sim_temp
+        station_history_df["pH"] = sim_ph
+        station_history_df["salinity_PSU"] = sim_sal
 
-forecast_df = generate_forecast_features_from_history(station_history_df, hours=24, sim_targets=sim_targets)
+forecast_df = generate_forecast_features_from_history(station_history_df, hours=24)
 
 pred_temps = pd.Series(align_and_predict(models["temp"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
 pred_dos = pd.Series(align_and_predict(models["do"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
@@ -279,7 +284,7 @@ else:
     raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
 raw_hypoxia_probs = pd.Series(raw_hypoxia_probs).rolling(window=3, min_periods=1, center=True).mean().values
-hypoxia_percentages = raw_hypoxia_probs * 100.0
+hypoxia_percentages = np.clip(raw_hypoxia_probs * 100.0 * farmer_sensitivity, 0.0, 100.0)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Forecast Time Control")
