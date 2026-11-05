@@ -11,6 +11,7 @@ st.set_page_config(page_title="Long Island Estuary Water Quality Portal", layout
 
 @st.cache_resource
 def load_all_models():
+    # Load all trained regression and classification XGBoost model artifacts
     models = {}
     model_files = {
         "do": "xgb_do_regression_weather_model(FINAL) (1).json",
@@ -35,8 +36,9 @@ def load_all_models():
             
     return models
 
-def fetch_usgs_station_data(station_id):
-    url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00010,00300,00400,00095"
+def fetch_usgs_station_history(station_id, days=3):
+    # Fetch multi-day historical telemetry from USGS Instantaneous Values API
+    url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00010,00300,00400,00095&period=P{days}D"
     response = requests.get(url)
     if response.status_code != 200:
         raise RuntimeError(f"USGS API request failed with status code {response.status_code}")
@@ -46,24 +48,34 @@ def fetch_usgs_station_data(station_id):
     if not time_series:
         raise ValueError(f"No time series data returned for station {station_id}")
         
-    readings = {}
+    dfs = []
+    param_map = {
+        "00010": "temp_C",
+        "00300": "DO_mgL",
+        "00400": "pH",
+        "00095": "salinity_PSU"
+    }
+    
     for ts in time_series:
         var_code = ts["variable"]["variableCode"][0]["value"]
         values = ts.get("values", [])[0].get("value", [])
         if values:
-            latest_val = float(values[-1]["value"])
-            readings[var_code] = latest_val
-        else:
-            raise ValueError(f"Missing instantaneous values for parameter {var_code} at station {station_id}")
+            temp_df = pd.DataFrame(values)[["dateTime", "value"]]
+            temp_df["dateTime"] = pd.to_datetime(temp_df["dateTime"])
+            temp_df["value"] = temp_df["value"].astype(float)
             
-    required_params = ["00010", "00300", "00400", "00095"]
-    for param in required_params:
-        if param not in readings:
-            raise ValueError(f"Required parameter {param} is missing from station {station_id} telemetry")
+            col_name = param_map.get(var_code, var_code)
+            temp_df = temp_df.rename(columns={"value": col_name})
+            dfs.append(temp_df.set_index("dateTime"))
             
-    return readings
+    if not dfs:
+        raise ValueError(f"Failed to parse time series parameters for station {station_id}")
+        
+    combined_df = pd.concat(dfs, axis=1).sort_index().ffill().bfill().dropna()
+    return combined_df
 
 def align_and_predict(model, input_df):
+    # Align DataFrame columns with model feature specifications for regression
     booster = model.get_booster()
     feature_names = booster.feature_names
     if feature_names:
@@ -74,6 +86,7 @@ def align_and_predict(model, input_df):
     return model.predict(input_df)
 
 def align_and_predict_proba(model, input_df):
+    # Align DataFrame columns with model feature specifications for classification
     booster = model.get_booster()
     feature_names = booster.feature_names
     if feature_names:
@@ -83,21 +96,43 @@ def align_and_predict_proba(model, input_df):
         input_df = input_df[feature_names]
     return model.predict_proba(input_df)
 
-def generate_forecast_features(base_features, hours=24, site_cat_id=0):
+def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0):
+    # Extract historical derivatives and rolling statistics from real USGS telemetry
+    last_row = history_df.iloc[-1]
+    base_temp = last_row["temp_C"]
+    base_do = last_row["DO_mgL"]
+    base_pH = last_row["pH"]
+    base_sal = last_row["salinity_PSU"]
+    
+    # Calculate exact rate of change metrics from 15-minute historical sampling intervals
+    dDO_1h = history_df["DO_mgL"].diff(4).iloc[-1] if len(history_df) >= 4 else 0.0
+    dDO_3h = history_df["DO_mgL"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
+    dDO_6h = history_df["DO_mgL"].diff(24).iloc[-1] if len(history_df) >= 24 else 0.0
+    dDO_12h = history_df["DO_mgL"].diff(48).iloc[-1] if len(history_df) >= 48 else 0.0
+    dDO_24h = history_df["DO_mgL"].diff(96).iloc[-1] if len(history_df) >= 96 else 0.0
+    
+    dpH_3h = history_df["pH"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
+    dpH_6h = history_df["pH"].diff(24).iloc[-1] if len(history_df) >= 24 else 0.0
+    
+    dDO_accel = dDO_3h - (dDO_6h / 2.0)
+    
+    # Calculate actual rolling volatility from historical telemetry window
+    do_std_12h = history_df["DO_mgL"].rolling(48, min_periods=1).std().iloc[-1]
+    do_std_24h = history_df["DO_mgL"].rolling(96, min_periods=1).std().iloc[-1]
+    ph_std_24h = history_df["pH"].rolling(96, min_periods=1).std().iloc[-1]
+    
     future_rows = []
     current_time = datetime.datetime.now()
-    
-    base_temp = base_features.get("temp_C", 20.0)
-    base_do = base_features.get("DO_mgL", 8.0)
-    base_pH = base_features.get("pH", 7.8)
-    base_sal = base_features.get("salinity_PSU", 25.0)
     
     for i in range(hours):
         step_time = current_time + datetime.timedelta(hours=i)
         hour_of_day = step_time.hour
         day_of_year = step_time.timetuple().tm_yday
         
+        # Diurnal temperature cycle approximation
         temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
+        
+        # Exact thermodynamic equations matching model training script
         do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
         do_deficit = max(0.0, do_solubility - base_do)
         do_sat_ratio = base_do / (do_solubility + 1e-5)
@@ -109,22 +144,22 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
             'DO_mgL': base_do,
             'pH': base_pH,
             'salinity_PSU': base_sal,
-            'dDO_dt_1h': 0.1 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dDO_dt_3h': 0.2 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dDO_dt_6h': 0.3 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dDO_dt_12h': 0.4 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dDO_dt_24h': 0.0,
-            'dpH_dt_3h': 0.05 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dpH_dt_6h': 0.1 * np.sin(2 * np.pi * hour_of_day / 24.0),
-            'dDO_acceleration': 0.05,
+            'dDO_dt_1h': 0.0 if pd.isna(dDO_1h) else dDO_1h,
+            'dDO_dt_3h': 0.0 if pd.isna(dDO_3h) else dDO_3h,
+            'dDO_dt_6h': 0.0 if pd.isna(dDO_6h) else dDO_6h,
+            'dDO_dt_12h': 0.0 if pd.isna(dDO_12h) else dDO_12h,
+            'dDO_dt_24h': 0.0 if pd.isna(dDO_24h) else dDO_24h,
+            'dpH_dt_3h': 0.0 if pd.isna(dpH_3h) else dpH_3h,
+            'dpH_dt_6h': 0.0 if pd.isna(dpH_6h) else dpH_6h,
+            'dDO_acceleration': 0.0 if pd.isna(dDO_accel) else dDO_accel,
             'DO_pH_ratio': do_pH_ratio,
             'DO_temp_ratio': do_temp_ratio,
             'DO_solubility_sat': do_solubility,
             'DO_saturation_ratio': do_sat_ratio,
             'DO_deficit': do_deficit,
-            'DO_std_12h': 0.3,
-            'DO_std_24h': 0.5,
-            'pH_std_24h': 0.1,
+            'DO_std_12h': 0.2 if pd.isna(do_std_12h) else do_std_12h,
+            'DO_std_24h': 0.3 if pd.isna(do_std_24h) else do_std_24h,
+            'pH_std_24h': 0.1 if pd.isna(ph_std_24h) else ph_std_24h,
             'sin_hour': np.sin(2 * np.pi * hour_of_day / 24.0),
             'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
             'sin_day': np.sin(2 * np.pi * day_of_year / 365.25),
@@ -157,7 +192,7 @@ station_candidates = {
 valid_stations = {}
 for name, sid in station_candidates.items():
     try:
-        fetch_usgs_station_data(sid)
+        fetch_usgs_station_history(sid, days=1)
         valid_stations[name] = sid
     except Exception:
         pass
@@ -170,19 +205,15 @@ selected_station_name = st.sidebar.selectbox("Select Validated Station", list(va
 selected_station_id = valid_stations[selected_station_name]
 
 try:
-    current_readings = fetch_usgs_station_data(selected_station_id)
+    station_history_df = fetch_usgs_station_history(selected_station_id, days=3)
 except Exception as e:
-    st.error(f"Failed to fetch live USGS data: {e}")
+    st.error(f"Failed to fetch USGS historical data: {e}")
     st.stop()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Admin Testing Portal")
 admin_pass = st.sidebar.text_input("Enter Admin Passcode", type="password")
 
-simulated_do = current_readings["00300"]
-simulated_temp = current_readings["00010"]
-simulated_ph = current_readings["00400"]
-simulated_sal = current_readings["00095"]
 show_raw_prob = False
 
 if admin_pass == "admin123":
@@ -190,19 +221,13 @@ if admin_pass == "admin123":
     sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
     show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
     if sim_mode:
-        simulated_do = st.sidebar.slider("Simulated DO (mg/L)", 1.0, 12.0, float(current_readings["00300"]))
-        simulated_temp = st.sidebar.slider("Simulated Temp (°C)", 5.0, 35.0, float(current_readings["00010"]))
-        simulated_ph = st.sidebar.slider("Simulated pH", 5.0, 10.0, float(current_readings["00400"]))
-        simulated_sal = st.sidebar.slider("Simulated Salinity (PSU)", 0.0, 40.0, float(current_readings["00095"]))
+        last_idx = station_history_df.index[-1]
+        station_history_df.loc[last_idx, "DO_mgL"] = st.sidebar.slider("Simulated DO (mg/L)", 1.0, 12.0, float(station_history_df["DO_mgL"].iloc[-1]))
+        station_history_df.loc[last_idx, "temp_C"] = st.sidebar.slider("Simulated Temp (°C)", 5.0, 35.0, float(station_history_df["temp_C"].iloc[-1]))
+        station_history_df.loc[last_idx, "pH"] = st.sidebar.slider("Simulated pH", 5.0, 10.0, float(station_history_df["pH"].iloc[-1]))
+        station_history_df.loc[last_idx, "salinity_PSU"] = st.sidebar.slider("Simulated Salinity (PSU)", 0.0, 40.0, float(station_history_df["salinity_PSU"].iloc[-1]))
 
-base_df = pd.DataFrame([{
-    "temp_C": simulated_temp,
-    "DO_mgL": simulated_do,
-    "pH": simulated_ph,
-    "salinity_PSU": simulated_sal
-}])
-
-forecast_df = generate_forecast_features(base_df.iloc[0].to_dict(), hours=24)
+forecast_df = generate_forecast_features_from_history(station_history_df, hours=24)
 
 pred_temps = align_and_predict(models["temp"], forecast_df.copy())
 pred_dos = align_and_predict(models["do"], forecast_df.copy())
