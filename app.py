@@ -2,400 +2,198 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import plotly.graph_objects as go
 import requests
-import os
+from datetime import datetime, timedelta
 
 st.set_page_config(
-    page_title="Long Island Oyster AI",
+    page_title="Long Island Oyster AI Portal",
+    page_icon="🦪",
     layout="wide"
 )
+st.title("🦪 Long Island Oyster AI Portal")
+st.markdown("Estuary telemetry and machine learning water quality forecasting system protecting *Crassostrea virginica*.")
 
-st.markdown("""
-<style>
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 15px;
-        border-radius: 8px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-def check_password():
-    def password_entered():
-        if st.session_state["passcode_input"] == "OysterFarmer2026!":
-            st.session_state["authenticated"] = True
-            del st.session_state["passcode_input"]
-        else:
-            st.session_state["authenticated"] = False
-            st.error("Incorrect passcode. Access restricted to authorized personnel.")
-
-    if not st.session_state["authenticated"]:
-        st.text_input(
-            "Enter Passcode for Farmer / Sensor Dashboard:",
-            type="password",
-            on_change=password_entered,
-            key="passcode_input"
-        )
-        return False
-    else:
-        return True
-
-@st.cache_data(ttl=3600)
-def fetch_robust_water_data(primary_station, secondary_station):
-    param_names = {
-        '00300': 'Dissolved Oxygen (mg/L)',
-        '00010': 'Water Temperature (C)',
-        '00400': 'Estuary pH',
-        '00095': 'Salinity / Conductivity'
-    }
-    
-    def query_usgs(station_id):
-        url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00300,00010,00095,00400&period=P2D"
-        records = []
-        latest_vals = {}
-        try:
-            response = requests.get(url, timeout=6)
-            if response.status_code == 200:
-                data = response.json()
-                time_series = data.get('value', {}).get('timeSeries', [])
-                for ts in time_series:
-                    var_code = ts.get('variable', {}).get('variableCode', [{}])[0].get('value')
-                    label = param_names.get(var_code, var_code)
-                    values = ts.get('values', [{}])[0].get('value', [])
-                    if values:
-                        df_temp = pd.DataFrame(values)
-                        df_temp['value'] = pd.to_numeric(df_temp['value'], errors='coerce')
-                        df_temp['value'] = df_temp['value'].interpolate(method='linear')
-                        latest_val = float(df_temp['value'].iloc[-1])
-                        latest_vals[var_code] = latest_val
-                        records.append({
-                            'Water Quality Parameter': label,
-                            'Latest Value': latest_val,
-                            'Timestamp': df_temp['dateTime'].iloc[-1]
-                        })
-        except Exception:
-            pass
-        return pd.DataFrame(records), latest_vals
-
-    df_res, vals = query_usgs(primary_station)
-    if len(vals) < 2:
-        df_res, vals = query_usgs(secondary_station)
-        
-    if len(vals) < 2:
-        seed_offset = float(hash(primary_station) % 15) / 10.0
-        do_base = round(6.0 + seed_offset, 2)
-        temp_base = round(17.5 + seed_offset, 2)
-        ph_base = round(7.8 + (seed_offset * 0.05), 2)
-        sal_base = round(26.0 + seed_offset, 2)
-        
-        df_res = pd.DataFrame([
-            {'Water Quality Parameter': 'Dissolved Oxygen (mg/L)', 'Latest Value': do_base, 'Timestamp': 'Dynamic Station Baseline'},
-            {'Water Quality Parameter': 'Water Temperature (C)', 'Latest Value': temp_base, 'Timestamp': 'Dynamic Station Baseline'},
-            {'Water Quality Parameter': 'Estuary pH', 'Latest Value': ph_base, 'Timestamp': 'Dynamic Station Baseline'},
-            {'Water Quality Parameter': 'Salinity / Conductivity', 'Latest Value': sal_base, 'Timestamp': 'Dynamic Station Baseline'}
-        ])
-        vals = {'00300': do_base, '00010': temp_base, '00400': ph_base, '00095': sal_base}
-        
-    return df_res, vals
-
-@st.cache_data(ttl=3600)
-def fetch_open_meteo_weather():
-    url = "https://api.open-meteo.com/v1/forecast?latitude=40.87&longitude=-73.53&current=temperature_2m,surface_pressure,wind_speed_10m"
-    weather_vals = {'air_temp_C': 15.0, 'pressure_hPa': 1013.25, 'wind_speed_ms': 3.5}
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            current = data.get('current', {})
-            weather_vals['air_temp_C'] = float(current.get('temperature_2m', 15.0))
-            weather_vals['pressure_hPa'] = float(current.get('surface_pressure', 1013.25))
-            weather_vals['wind_speed_ms'] = float(current.get('wind_speed_10m', 3.5))
-    except Exception:
-        pass
-    return weather_vals
-
-def load_xgboost_model(filename):
-    if os.path.exists(filename):
-        try:
-            model = xgb.XGBRegressor()
-            model.load_model(filename)
-            return model
-        except Exception:
-            try:
-                model = xgb.XGBClassifier()
-                model.load_model(filename)
-                return model
-            except Exception as e:
-                st.error(f"Failed to load model file {filename}: {e}")
-                return None
-    else:
-        st.warning(f"Model file not found: {filename}")
-        return None
-
-do_model = load_xgboost_model("xgb_do_regression_weather_model(FINAL).json")
-temp_model = load_xgboost_model("xgb_temp_C_regression_weather_model(FINAL).json")
-crash_model = load_xgboost_model("xgb_hypoxia_weather_model(FINAL).json")
-ph_model = load_xgboost_model("xgb_pH_regression_weather_model(FINAL).json")
-sal_model = load_xgboost_model("xgb_salinity_PSU_regression_weather_model(FINAL).json")
-
-def predict_model_value(model, live_vals, weather_dict, station_id, horizon, primary_code, base_default, is_classifier=False):
-    base_val = live_vals.get(primary_code, base_default)
-    temp = float(live_vals.get('00010', 18.5))
-    do = float(live_vals.get('00300', 6.2)) - (horizon * 0.04 if is_classifier else 0.0)
-    ph = float(live_vals.get('00400', 7.9))
-    sal = float(live_vals.get('00095', 26.5))
-    
-    air_temp = float(weather_dict.get('air_temp_C', 15.0))
-    pressure = float(weather_dict.get('pressure_hPa', 1013.25))
-    wind_speed = float(weather_dict.get('wind_speed_ms', 3.5))
-    thermal_grad = air_temp - temp
-    
-    solubility = 14.6204 - (0.41022 * temp) + (0.007991 * (temp ** 2)) - (0.000077774 * (temp ** 3))
-    deficit = solubility - do
-    
-    hour_val = (pd.Timestamp.now().hour + horizon) % 24
-    sin_hr = np.sin(2 * np.pi * hour_val / 24.0)
-    cos_hr = np.cos(2 * np.pi * hour_val / 24.0)
-    
-    site_mapping = {
-        "01303152": 0,
-        "01297000": 1,
-        "01115000": 2,
-        "01304500": 3,
-        "01305000": 4
-    }
-    site_cat = site_mapping.get(str(station_id), 0)
-
-    if model is not None:
-        features = getattr(model, "feature_names_in_", None)
-        if features is not None:
-            input_dict = {}
-            for f in features:
-                fl = f.lower()
-                if "temp_c" in fl and "air" not in fl:
-                    input_dict[f] = [temp]
-                elif "do_mgl" in fl or "oxygen" in fl:
-                    input_dict[f] = [do]
-                elif "ph" in fl and "dp_h" not in fl:
-                    input_dict[f] = [ph]
-                elif "salinity" in fl:
-                    input_dict[f] = [sal]
-                elif "air_temp" in fl:
-                    input_dict[f] = [air_temp]
-                elif "pressure" in fl:
-                    input_dict[f] = [pressure]
-                elif "wind" in fl:
-                    input_dict[f] = [wind_speed]
-                elif "thermal" in fl:
-                    input_dict[f] = [thermal_grad]
-                elif "solubility" in fl:
-                    input_dict[f] = [solubility]
-                elif "deficit" in fl:
-                    input_dict[f] = [deficit]
-                elif "sin_hour" in fl:
-                    input_dict[f] = [sin_hr]
-                elif "cos_hour" in fl:
-                    input_dict[f] = [cos_hr]
-                elif "site_code_cat" in fl:
-                    input_dict[f] = [float(site_cat)]
-                else:
-                    input_dict[f] = [0.0]
-            df_in = pd.DataFrame(input_dict)
-            if is_classifier and hasattr(model, "predict_proba"):
-                probs = model.predict_proba(df_in)
-                return float(probs[0][1] * 100.0)
-            else:
-                pred = model.predict(df_in)
-                return float(pred[0])
-        else:
-            df_in = pd.DataFrame([[base_val]], columns=['base_val'])
-            pred = model.predict(df_in)
-            return float(pred[0])
-    else:
-        raise ValueError("Model object is None.")
-
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Select View", ["Public Forecast and Map", "Farmer and Sensor Dashboard"])
-
-stations = {
-    "Oyster Bay Harbor (USGS 01303152)": "01303152",
-    "Long Island Sound at Rye (USGS 01297000)": "01297000",
-    "Long Island Sound Central (USGS 01115000)": "01115000",
-    "Western Long Island Sound (USGS 01304500)": "01304500",
-    "Great South Bay Node (USGS 01305000)": "01305000"
+STATIONS = {
+    "Great South Bay Node (USGS 01305000)": {"site_code": "01305000", "lat": 40.65, "lon": -73.25},
+    "Western Long Island Sound (USGS 01304500)": {"site_code": "01304500", "lat": 40.85, "lon": -73.65},
+    "Central Long Island Sound (USGS 01115000)": {"site_code": "01115000", "lat": 41.15, "lon": -72.65}
 }
 
-if page == "Public Forecast and Map":
-    st.title("Long Island Oyster AI Portal")
-    st.write("Estuary telemetry and machine learning water quality forecasting system protecting Crassostrea virginica.")
-    
-    selected_station_name = st.selectbox("Select Monitoring Station", list(stations.keys()))
-    station_id = stations[selected_station_name]
-    sec_station_id = "01115000" if station_id != "01115000" else "01304500"
-    
-    live_df, live_vals = fetch_robust_water_data(station_id, sec_station_id)
-    weather_vals = fetch_open_meteo_weather()
-    
-    st.markdown("---")
-    st.subheader("Live Estuary Telemetry Feed & Atmospheric Drivers")
-    if not live_df.empty:
-        st.dataframe(live_df, width='stretch')
-        
-        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-        with col_m1:
-            st.metric(label="Dissolved Oxygen", value=f"{live_vals.get('00300', 6.2):.2f} mg/L")
-        with col_m2:
-            st.metric(label="Water Temp", value=f"{live_vals.get('00010', 18.5):.2f} C")
-        with col_m3:
-            st.metric(label="Estuary pH", value=f"{live_vals.get('00400', 7.9):.2f}")
-        with col_m4:
-            st.metric(label="Salinity", value=f"{live_vals.get('00095', 26.5):.2f} PSU")
-        with col_m5:
-            st.metric(label="Air Temp", value=f"{weather_vals.get('air_temp_C', 15.0):.2f} C")
-
-    st.markdown("---")
-    st.subheader("Interactive 24-Hour Forecast Horizon Selector")
-    horizon = st.slider("Select Hours Ahead for Prediction", 1, 24, 6, key="public_slider")
-    
-    try:
-        p_do = predict_model_value(do_model, live_vals, weather_vals, station_id, horizon, '00300', 6.2)
-        p_temp = predict_model_value(temp_model, live_vals, weather_vals, station_id, horizon, '00010', 18.5)
-        p_ph = predict_model_value(ph_model, live_vals, weather_vals, station_id, horizon, '00400', 7.9)
-        p_sal = predict_model_value(sal_model, live_vals, weather_vals, station_id, horizon, '00095', 26.5)
-        p_risk = min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, horizon, '00300', 10.0, is_classifier=True)))
-
-        col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
-        with col_p1:
-            st.metric(label=f"DO ({horizon}h)", value=f"{p_do:.2f} mg/L")
-        with col_p2:
-            st.metric(label=f"Temp ({horizon}h)", value=f"{p_temp:.2f} C")
-        with col_p3:
-            st.metric(label=f"pH ({horizon}h)", value=f"{p_ph:.2f}")
-        with col_p4:
-            st.metric(label=f"Salinity ({horizon}h)", value=f"{p_sal:.2f} PSU")
-        with col_p5:
-            st.metric(label=f"Crash Risk ({horizon}h)", value=f"{p_risk:.1f}%")
-
-        st.markdown("---")
-        st.subheader("All Five Model Forecast Graphs (24-Hour Trajectory)")
-        hours_list = list(range(1, 25))
-
-        st.markdown("#### Dissolved Oxygen Model Forecast")
-        do_chart = pd.DataFrame({"Hour": hours_list, "DO (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, station_id, h, '00300', 6.2) for h in hours_list]}).set_index("Hour")
-        st.line_chart(do_chart)
-
-        st.markdown("#### Water Temperature Model Forecast")
-        temp_chart = pd.DataFrame({"Hour": hours_list, "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, station_id, h, '00010', 18.5) for h in hours_list]}).set_index("Hour")
-        st.line_chart(temp_chart)
-
-        st.markdown("#### pH Model Forecast")
-        ph_chart = pd.DataFrame({"Hour": hours_list, "pH": [predict_model_value(ph_model, live_vals, weather_vals, station_id, h, '00400', 7.9) for h in hours_list]}).set_index("Hour")
-        st.line_chart(ph_chart)
-
-        st.markdown("#### Salinity Model Forecast")
-        sal_chart = pd.DataFrame({"Hour": hours_list, "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, station_id, h, '00095', 26.5) for h in hours_list]}).set_index("Hour")
-        st.line_chart(sal_chart)
-
-        st.markdown("#### Hypoxia Crash Likelihood Classification Model")
-        risk_chart = pd.DataFrame({"Hour": hours_list, "Crash Risk (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, h, '00300', 10.0, is_classifier=True))) for h in hours_list]}).set_index("Hour")
-        st.line_chart(risk_chart)
-
-    except Exception as e:
-        st.error(f"Model Inference Error: {e}")
-
-elif page == "Farmer and Sensor Dashboard":
-    st.title("Restricted IoT and Live Sensor Dashboard")
-    st.write("Secure telemetry pipeline streaming directly from custom ESP32 dock nodes and executing weather-aware XGBoost predictive models.")
-    
-    if check_password():
-        st.success("Access Granted. Authorized farmer telemetry online.")
-        
-        selected_station_name = st.selectbox("Select Active Telemetry Station", list(stations.keys()), key="farmer_station")
-        station_id = stations[selected_station_name]
-        sec_station_id = "01115000" if station_id != "01115000" else "01304500"
-        
-        live_df, live_vals = fetch_robust_water_data(station_id, sec_station_id)
-        weather_vals = fetch_open_meteo_weather()
-        
-        st.markdown("---")
-        st.subheader("Live Station Telemetry Summary")
-        if not live_df.empty:
-            st.dataframe(live_df, width='stretch')
-
-        st.markdown("---")
-        st.subheader("Interactive Predictive Horizon Control")
-        farmer_horizon = st.slider("Select Prediction Horizon (Hours Ahead)", 1, 24, 6, key="farmer_slider")
-        
+@st.cache_resource
+def load_all_models():
+    models = {}
+    model_paths = {
+        'DO_mgL': 'xgb_do_regression_weather_model(FINAL).json',
+        'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
+        'pH': 'xgb_pH_regression_model(FINAL).json',
+        'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL).json',
+        'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
+    }
+    for key, path in model_paths.items():
         try:
-            f_do = round(predict_model_value(do_model, live_vals, weather_vals, station_id, farmer_horizon, '00300', 5.8), 2)
-            f_temp = round(predict_model_value(temp_model, live_vals, weather_vals, station_id, farmer_horizon, '00010', 19.2), 2)
-            f_ph = round(predict_model_value(ph_model, live_vals, weather_vals, station_id, farmer_horizon, '00400', 7.82), 2)
-            f_sal = round(predict_model_value(sal_model, live_vals, weather_vals, station_id, farmer_horizon, '00095', 26.5), 2)
-            f_risk = round(min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, farmer_horizon, '00300', 12.4, is_classifier=True))), 1)
-            
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric(label=f"DO ({farmer_horizon}h)", value=f"{f_do} mg/L")
-            with col2:
-                st.metric(label=f"Temp ({farmer_horizon}h)", value=f"{f_temp} C")
-            with col3:
-                st.metric(label=f"pH ({farmer_horizon}h)", value=f"{f_ph}")
-            with col4:
-                st.metric(label=f"Salinity ({farmer_horizon}h)", value=f"{f_sal} PSU")
-            with col5:
-                st.metric(label=f"Crash Risk ({farmer_horizon}h)", value=f"{f_risk}%")
-                
-            st.markdown("---")
-            st.subheader("Individual Model Regressor Forecast Graphs (24-Hour Horizon)")
-            
-            hours_list = list(range(1, 25))
-            
-            st.markdown("#### Dissolved Oxygen Model Forecast")
-            do_df = pd.DataFrame({
-                "Hour": hours_list,
-                "Dissolved Oxygen (mg/L)": [predict_model_value(do_model, live_vals, weather_vals, station_id, h, '00300', 5.8) for h in hours_list]
-            }).set_index("Hour")
-            st.line_chart(do_df)
-            
-            st.markdown("#### Water Temperature Model Forecast")
-            temp_df = pd.DataFrame({
-                "Hour": hours_list,
-                "Temperature (C)": [predict_model_value(temp_model, live_vals, weather_vals, station_id, h, '00010', 19.2) for h in hours_list]
-            }).set_index("Hour")
-            st.line_chart(temp_df)
-            
-            st.markdown("#### pH Model Forecast")
-            ph_df = pd.DataFrame({
-                "Hour": hours_list,
-                "pH": [predict_model_value(ph_model, live_vals, weather_vals, station_id, h, '00400', 7.82) for h in hours_list]
-            }).set_index("Hour")
-            st.line_chart(ph_df)
-            
-            st.markdown("#### Salinity Model Forecast")
-            sal_df = pd.DataFrame({
-                "Hour": hours_list,
-                "Salinity (PSU)": [predict_model_value(sal_model, live_vals, weather_vals, station_id, h, '00095', 26.5) for h in hours_list]
-            }).set_index("Hour")
-            st.line_chart(sal_df)
-            
-            st.markdown("#### Hypoxia Crash Likelihood Classification Model")
-            risk_graph_df = pd.DataFrame({
-                "Hour": hours_list,
-                "Crash Probability (%)": [min(100.0, max(0.0, predict_model_value(crash_model, live_vals, weather_vals, station_id, h, '00300', 12.4, is_classifier=True))) for h in hours_list]
-            }).set_index("Hour")
-            st.line_chart(risk_graph_df)
-            
-            st.markdown("---")
-            st.subheader("Hardware Telemetry Status")
-            st.write("Node ID: ESP32-Oyster-01 | Signal: -62 dBm | MicroSD Backup Active | Status: Operational")
-
+            if key == 'hypoxia':
+                model = xgb.XGBClassifier()
+            else:
+                model = xgb.XGBRegressor()
+            model.load_model(path)
+            models[key] = model
         except Exception as e:
-            st.error(f"Farmer Dashboard Model Inference Error: {e}")
+            st.error(f"Error loading model file '{path}': {e}")
+            models[key] = None
+    return models
+
+models = load_all_models()
+
+st.sidebar.header("Navigation")
+selected_station_name = st.sidebar.selectbox("Select Monitoring Station", list(STATIONS.keys()))
+station_info = STATIONS[selected_station_name]
+
+@st.cache_data(ttl=900)
+def fetch_live_usgs_telemetry(site_code):
+    url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={site_code}&parameterCd=00010,00300,00400,00095,00060,00065&siteStatus=all"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        series = data['value']['timeSeries']
+        latest_vals = {}
+        for s in series:
+            param_code = s['variable']['variableCode'][0]['value']
+            values = s['values'][0]['value']
+            if values:
+                latest_val = float(values[-1]['value'])
+                latest_vals[param_code] = latest_val
+        return {
+            'temp_C': latest_vals.get('00010', 18.5),
+            'DO_mgL': latest_vals.get('00300', 6.20),
+            'pH': latest_vals.get('00400', 7.90),
+            'salinity_PSU': latest_vals.get('00095', 26.5) / 1000.0 if '00095' in latest_vals else 26.5
+        }
+    except Exception:
+        return {'temp_C': 18.5, 'DO_mgL': 6.20, 'pH': 7.90, 'salinity_PSU': 26.5}
+
+@st.cache_data(ttl=1800)
+def fetch_open_meteo_weather(lat, lon):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": ["temperature_2m", "surface_pressure", "wind_speed_10m"],
+        "forecast_days": 2
+    }
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        json_data = response.json()['hourly']
+        return {
+            'air_temp_C': json_data['temperature_2m'][0],
+            'pressure_hPa': json_data['surface_pressure'][0],
+            'wind_speed_ms': json_data['wind_speed_10m'][0]
+        }
+    except Exception:
+        return {'air_temp_C': 19.0, 'pressure_hPa': 1013.25, 'wind_speed_ms': 3.5}
+
+telemetry = fetch_live_usgs_telemetry(station_info['site_code'])
+weather = fetch_open_meteo_weather(station_info['lat'], station_info['lon'])
+
+st.subheader("Live Estuary Telemetry")
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Dissolved Oxygen", f"{telemetry['DO_mgL']:.2f} mg/L", delta="Optimal" if telemetry['DO_mgL'] > 5.0 else "Warning")
+with col2:
+    st.metric("Water Temperature", f"{telemetry['temp_C']:.2f} °C")
+with col3:
+    st.metric("Estuary pH", f"{telemetry['pH']:.2f}")
+with col4:
+    st.metric("Salinity", f"{telemetry['salinity_PSU']:.2f} PSU")
+
+now = datetime.now()
+hour = now.hour
+doy = now.timetuple().tm_yday
+sin_hour = np.sin(2 * np.pi * hour / 24.0)
+cos_hour = np.cos(2 * np.pi * hour / 24.0)
+sin_season = np.sin(2 * np.pi * doy / 365.25)
+cos_season = np.cos(2 * np.pi * doy / 365.25)
+thermal_gradient = weather['air_temp_C'] - telemetry['temp_C']
+dDO_dt_3h = 0.0
+dDO_dt_6h = 0.0
+dDO_acceleration = 0.0
+temp = telemetry['temp_C']
+DO_solubility_sat = 14.652 - (0.41022 * temp) + (0.007991 * (temp**2)) - (0.000077774 * (temp**3))
+DO_deficit = DO_solubility_sat - telemetry['DO_mgL']
+DO_std_12h = 0.25
+pH_std_12h = 0.05
+site_code_cat = list(STATIONS.keys()).index(selected_station_name)
+
+horizons = list(range(1, 25))
+forecasts = {'DO_mgL': [], 'temp_C': [], 'pH': [], 'salinity_PSU': []}
+
+for h in horizons:
+    input_features = pd.DataFrame([{
+        'temp_C': telemetry['temp_C'],
+        'DO_mgL': telemetry['DO_mgL'],
+        'pH': telemetry['pH'],
+        'salinity_PSU': telemetry['salinity_PSU'],
+        'air_temp_C': weather['air_temp_C'],
+        'pressure_hPa': weather['pressure_hPa'],
+        'wind_speed_ms': weather['wind_speed_ms'],
+        'thermal_gradient': thermal_gradient,
+        'dDO_dt_3h': dDO_dt_3h,
+        'dDO_dt_6h': dDO_dt_6h,
+        'dDO_acceleration': dDO_acceleration,
+        'DO_solubility_sat': DO_solubility_sat,
+        'DO_deficit': DO_deficit,
+        'DO_std_12h': DO_std_12h,
+        'pH_std_12h': pH_std_12h,
+        'sin_hour': sin_hour,
+        'cos_hour': cos_hour,
+        'sin_season': sin_season,
+        'cos_season': cos_season,
+        'site_code_cat': float(site_code_cat),
+        'horizon': float(h)
+    }])
+    for param in forecasts.keys():
+        if models[param] is not None:
+            pred = models[param].predict(input_features)[0]
+            forecasts[param].append(pred)
+        else:
+            forecasts[param].append(telemetry[param])
+
+hypoxia_prob = 0.0
+if models['hypoxia'] is not None:
+    clf_features = input_features.drop(columns=['horizon'])
+    hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
+
+st.markdown("---")
+st.subheader("24-Hour Hypoxia Early Warning System")
+if hypoxia_prob > 0.40:
+    st.error(f"⚠️ **HIGH HYPOXIA CRASH RISK DETECTED**: {hypoxia_prob * 100:.1f}% probability of DO dropping below 3.0 mg/L in the next 24 hours. Consider deploying aeration or adjusting harvesting schedules.")
+else:
+    st.success(f"✅ **NORMAL ESTUARY CONDITIONS**: Hypoxia risk is low ({hypoxia_prob * 100:.1f}% probability).")
+
+st.subheader("24-Hour Multi-Parameter AI Forecast Trajectories")
+tab1, tab2, tab3, tab4 = st.tabs(["Dissolved Oxygen", "Water Temperature", "pH", "Salinity"])
+
+with tab1:
+    fig_do = go.Figure()
+    fig_do.add_trace(go.Scatter(x=horizons, y=forecasts['DO_mgL'], mode='lines+markers', name='Predicted DO (mg/L)', line=dict(color='#008080', width=3)))
+    fig_do.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Hypoxia Threshold (3.0 mg/L)")
+    fig_do.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Dissolved Oxygen (mg/L)", height=400)
+    st.plotly_chart(fig_do, use_container_width=True)
+
+with tab2:
+    fig_temp = go.Figure()
+    fig_temp.add_trace(go.Scatter(x=horizons, y=forecasts['temp_C'], mode='lines+markers', name='Predicted Temp (°C)', line=dict(color='#FF4B4B', width=3)))
+    fig_temp.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Water Temperature (°C)", height=400)
+    st.plotly_chart(fig_temp, use_container_width=True)
+
+with tab3:
+    fig_ph = go.Figure()
+    fig_ph.add_trace(go.Scatter(x=horizons, y=forecasts['pH'], mode='lines+markers', name='Predicted pH', line=dict(color='#9B59B6', width=3)))
+    fig_ph.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="pH Level", height=400)
+    st.plotly_chart(fig_ph, use_container_width=True)
+
+with tab4:
+    fig_sal = go.Figure()
+    fig_sal.add_trace(go.Scatter(x=horizons, y=forecasts['salinity_PSU'], mode='lines+markers', name='Predicted Salinity (PSU)', line=dict(color='#3498DB', width=3)))
+    fig_sal.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Salinity (PSU)", height=400)
+    st.plotly_chart(fig_sal, use_container_width=True)
