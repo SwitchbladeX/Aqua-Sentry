@@ -111,43 +111,41 @@ with col4:
     st.metric("Salinity", f"{telemetry['salinity_PSU']:.2f} PSU")
 
 now = datetime.now()
-hour = now.hour
+current_hour = now.hour
 doy = now.timetuple().tm_yday
-
-sin_hour = np.sin(2 * np.pi * hour / 24.0)
-cos_hour = np.cos(2 * np.pi * hour / 24.0)
-sin_season = np.sin(2 * np.pi * doy / 365.25)
-cos_season = np.cos(2 * np.pi * doy / 365.25)
-
-thermal_gradient = weather['air_temp_C'] - telemetry['temp_C']
-dDO_dt_3h = 0.0
-dDO_dt_6h = 0.0
-dDO_acceleration = 0.0
-
-temp = telemetry['temp_C']
-DO_solubility_sat = 14.652 - (0.41022 * temp) + (0.007991 * (temp**2)) - (0.000077774 * (temp**3))
-DO_deficit = DO_solubility_sat - telemetry['DO_mgL']
-DO_std_12h = 0.25
-pH_std_12h = 0.05
-
-site_code_cat = list(STATIONS.keys()).index(selected_station_name)
+site_code_cat = float(list(STATIONS.keys()).index(selected_station_name))
 
 horizons = list(range(1, 25))
 forecasts = {'DO_mgL': [], 'temp_C': [], 'pH': [], 'salinity_PSU': []}
 
 for h in horizons:
-    input_features = pd.DataFrame([{
+    forecast_hour = (current_hour + h) % 24
+    sin_hour = np.sin(2 * np.pi * forecast_hour / 24.0)
+    cos_hour = np.cos(2 * np.pi * forecast_hour / 24.0)
+    sin_season = np.sin(2 * np.pi * doy / 365.25)
+    cos_season = np.cos(2 * np.pi * doy / 365.25)
+
+    air_temp_projected = weather['air_temp_C'] + 2.0 * np.sin(2 * np.pi * (forecast_hour - 6) / 24.0)
+    thermal_gradient = air_temp_projected - telemetry['temp_C']
+    
+    temp = telemetry['temp_C']
+    DO_solubility_sat = 14.652 - (0.41022 * temp) + (0.007991 * (temp**2)) - (0.000077774 * (temp**3))
+    DO_deficit = DO_solubility_sat - telemetry['DO_mgL']
+    DO_std_12h = 0.25
+    pH_std_12h = 0.05
+
+    full_features = {
         'temp_C': telemetry['temp_C'],
         'DO_mgL': telemetry['DO_mgL'],
         'pH': telemetry['pH'],
         'salinity_PSU': telemetry['salinity_PSU'],
-        'air_temp_C': weather['air_temp_C'],
+        'air_temp_C': air_temp_projected,
         'pressure_hPa': weather['pressure_hPa'],
         'wind_speed_ms': weather['wind_speed_ms'],
         'thermal_gradient': thermal_gradient,
-        'dDO_dt_3h': dDO_dt_3h,
-        'dDO_dt_6h': dDO_dt_6h,
-        'dDO_acceleration': dDO_acceleration,
+        'dDO_dt_3h': 0.0,
+        'dDO_dt_6h': 0.0,
+        'dDO_acceleration': 0.0,
         'DO_solubility_sat': DO_solubility_sat,
         'DO_deficit': DO_deficit,
         'DO_std_12h': DO_std_12h,
@@ -156,44 +154,70 @@ for h in horizons:
         'cos_hour': cos_hour,
         'sin_season': sin_season,
         'cos_season': cos_season,
-        'site_code_cat': float(site_code_cat),
+        'site_code_cat': site_code_cat,
         'horizon': float(h)
-    }])
+    }
+
+    master_df = pd.DataFrame([full_features])
 
     for param, model in models.items():
         if param in forecasts and model is not None:
             try:
-                if hasattr(model, 'feature_names_in_'):
-                    expected_features = model.feature_names_in_
-                    aligned_features = pd.DataFrame(columns=expected_features)
-                    for col in expected_features:
-                        if col in input_features.columns:
-                            aligned_features[col] = input_features[col]
-                        else:
-                            aligned_features[col] = 0.0
-                    pred = model.predict(aligned_features)[0]
-                else:
-                    pred = model.predict(input_features)[0]
-                forecasts[param].append(pred)
+                booster = model.get_booster()
+                expected_cols = booster.feature_names
+                
+                aligned_df = pd.DataFrame(columns=expected_cols)
+                for col in expected_cols:
+                    if col in master_df.columns:
+                        aligned_df[col] = master_df[col]
+                    else:
+                        aligned_df[col] = 0.0
+                        
+                pred = model.predict(aligned_df)[0]
+                forecasts[param].append(float(pred))
             except Exception:
-                forecasts[param].append(telemetry[param])
+                forecasts[param].append(float(telemetry[param]))
+
+base_clf_features = {
+    'temp_C': telemetry['temp_C'],
+    'DO_mgL': telemetry['DO_mgL'],
+    'pH': telemetry['pH'],
+    'salinity_PSU': telemetry['salinity_PSU'],
+    'air_temp_C': weather['air_temp_C'],
+    'pressure_hPa': weather['pressure_hPa'],
+    'wind_speed_ms': weather['wind_speed_ms'],
+    'thermal_gradient': weather['air_temp_C'] - telemetry['temp_C'],
+    'dDO_dt_3h': 0.0,
+    'dDO_dt_6h': 0.0,
+    'dDO_acceleration': 0.0,
+    'DO_solubility_sat': DO_solubility_sat,
+    'DO_deficit': DO_deficit,
+    'DO_std_12h': DO_std_12h,
+    'pH_std_12h': pH_std_12h,
+    'sin_hour': np.sin(2 * np.pi * current_hour / 24.0),
+    'cos_hour': np.cos(2 * np.pi * current_hour / 24.0),
+    'sin_season': sin_season,
+    'cos_season': cos_season,
+    'site_code_cat': site_code_cat
+}
+clf_master_df = pd.DataFrame([base_clf_features])
 
 hypoxia_prob = 0.0
-if models['hypoxia'] is not None:
+if models.get('hypoxia') is not None:
     try:
-        clf_features = input_features.drop(columns=['horizon'], errors='ignore')
-        if hasattr(models['hypoxia'], 'feature_names_in_'):
-            expected_features = models['hypoxia'].feature_names_in_
-            clf_features_aligned = pd.DataFrame(columns=expected_features)
-            for col in expected_features:
-                if col in clf_features.columns:
-                    clf_features_aligned[col] = clf_features[col]
-                else:
-                    clf_features_aligned[col] = 0.0
-            hypoxia_prob = models['hypoxia'].predict_proba(clf_features_aligned)[0][1]
-        else:
-            hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
-    except Exception:
+        clf_model = models['hypoxia']
+        booster = clf_model.get_booster()
+        expected_cols = booster.feature_names
+        
+        aligned_clf = pd.DataFrame(columns=expected_cols)
+        for col in expected_cols:
+            if col in clf_master_df.columns:
+                aligned_clf[col] = clf_master_df[col]
+            else:
+                aligned_clf[col] = 0.0
+                
+        hypoxia_prob = float(clf_model.predict_proba(aligned_clf)[0][1])
+    except Exception as e:
         hypoxia_prob = 0.0
 
 st.markdown("---")
