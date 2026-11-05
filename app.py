@@ -9,6 +9,29 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Long Island Estuary Water Quality Portal", layout="wide")
 
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    .main {
+        background-color: #f8fafc;
+    }
+    
+    [data-testid="stSidebar"] {
+        background-color: #0f172a;
+        color: #ffffff;
+    }
+    
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stSubheader, [data-testid="stSidebar"] .stMarkdown {
+        color: #f1f5f9 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 @st.cache_resource
 def load_all_models():
     models = {}
@@ -92,12 +115,17 @@ def align_and_predict_proba(model, input_df):
         input_df = input_df[feature_names]
     return model.predict_proba(input_df)
 
-def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0):
+def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0, sim_targets=None):
     last_row = history_df.iloc[-1]
     base_temp = last_row["temp_C"]
     base_do = last_row["DO_mgL"]
     base_pH = last_row["pH"]
     base_sal = last_row["salinity_PSU"]
+    
+    target_temp = sim_targets.get("temp_C", base_temp) if sim_targets else base_temp
+    target_do = sim_targets.get("DO_mgL", base_do) if sim_targets else base_do
+    target_pH = sim_targets.get("pH", base_pH) if sim_targets else base_pH
+    target_sal = sim_targets.get("salinity_PSU", base_sal) if sim_targets else base_sal
     
     dDO_1h = history_df["DO_mgL"].diff(4).iloc[-1] if len(history_df) >= 4 else 0.0
     dDO_3h = history_df["DO_mgL"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
@@ -122,18 +150,24 @@ def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0)
         hour_of_day = step_time.hour
         day_of_year = step_time.timetuple().tm_yday
         
-        temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
-        do_deficit = max(0.0, do_solubility - base_do)
-        do_sat_ratio = base_do / (do_solubility + 1e-5)
-        do_pH_ratio = base_do / (base_pH + 1e-5)
-        do_temp_ratio = base_do / (temp_est + 1e-5)
+        progress = i / max(1, hours - 1)
+        
+        est_temp = base_temp + (target_temp - base_temp) * progress + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
+        est_do = base_do + (target_do - base_do) * progress
+        est_pH = base_pH + (target_pH - base_pH) * progress
+        est_sal = base_sal + (target_sal - base_sal) * progress
+        
+        do_solubility = 14.652 - (0.41022 * est_temp) + (0.007991 * (est_temp**2)) - (0.000077774 * (est_temp**3))
+        do_deficit = max(0.0, do_solubility - est_do)
+        do_sat_ratio = est_do / (do_solubility + 1e-5)
+        do_pH_ratio = est_do / (est_pH + 1e-5)
+        do_temp_ratio = est_do / (est_temp + 1e-5)
         
         row = {
-            'temp_C': temp_est,
-            'DO_mgL': base_do,
-            'pH': base_pH,
-            'salinity_PSU': base_sal,
+            'temp_C': est_temp,
+            'DO_mgL': est_do,
+            'pH': est_pH,
+            'salinity_PSU': est_sal,
             'dDO_dt_1h': 0.0 if pd.isna(dDO_1h) else dDO_1h,
             'dDO_dt_3h': 0.0 if pd.isna(dDO_3h) else dDO_3h,
             'dDO_dt_6h': 0.0 if pd.isna(dDO_6h) else dDO_6h,
@@ -167,7 +201,7 @@ except Exception as e:
     st.stop()
 
 st.title("Long Island Estuary Water Quality Portal")
-st.markdown("Advanced XGBoost Forecasting & Hypoxia Early Warning System for Estuarine Monitoring")
+st.markdown("##### Advanced XGBoost Forecasting & Hypoxia Early Warning System")
 
 station_candidates = {
     "Station 01304500 (Western Long Island Sound - Pelham)": "01304500",
@@ -206,21 +240,23 @@ st.sidebar.subheader("Admin Testing Portal")
 admin_pass = st.sidebar.text_input("Enter Admin Passcode", type="password")
 
 show_raw_prob = False
+sim_targets = None
 
 if admin_pass == "admin123":
     st.sidebar.success("Admin Mode Active")
     sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
     show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
     if sim_mode:
-        last_idx = station_history_df.index[-1]
-        station_history_df.loc[last_idx, "DO_mgL"] = st.sidebar.slider("Simulated DO (mg/L)", 1.0, 12.0, float(station_history_df["DO_mgL"].iloc[-1]))
-        station_history_df.loc[last_idx, "temp_C"] = st.sidebar.slider("Simulated Temp (°C)", 5.0, 35.0, float(station_history_df["temp_C"].iloc[-1]))
-        station_history_df.loc[last_idx, "pH"] = st.sidebar.slider("Simulated pH", 5.0, 10.0, float(station_history_df["pH"].iloc[-1]))
-        station_history_df.loc[last_idx, "salinity_PSU"] = st.sidebar.slider("Simulated Salinity (PSU)", 0.0, 40.0, float(station_history_df["salinity_PSU"].iloc[-1]))
+        last_row = station_history_df.iloc[-1]
+        sim_targets = {
+            "DO_mgL": st.sidebar.slider("Simulated Target DO (mg/L)", 1.0, 12.0, float(last_row["DO_mgL"])),
+            "temp_C": st.sidebar.slider("Simulated Target Temp (°C)", 5.0, 35.0, float(last_row["temp_C"])),
+            "pH": st.sidebar.slider("Simulated Target pH", 5.0, 10.0, float(last_row["pH"])),
+            "salinity_PSU": st.sidebar.slider("Simulated Target Salinity (PSU)", 0.0, 40.0, float(last_row["salinity_PSU"]))
+        }
 
-forecast_df = generate_forecast_features_from_history(station_history_df, hours=24)
+forecast_df = generate_forecast_features_from_history(station_history_df, hours=24, sim_targets=sim_targets)
 
-# Apply rolling smoothing to regression predictions to eliminate jagged tree thresholds
 pred_temps = pd.Series(align_and_predict(models["temp"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
 pred_dos = pd.Series(align_and_predict(models["do"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
 pred_phs = pd.Series(align_and_predict(models["pH"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
@@ -242,7 +278,6 @@ if hasattr(models["hypoxia"], "predict_proba"):
 else:
     raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
-# Smooth classification probabilities using a 3-hour moving average to ensure realistic physical continuity
 raw_hypoxia_probs = pd.Series(raw_hypoxia_probs).rolling(window=3, min_periods=1, center=True).mean().values
 hypoxia_percentages = raw_hypoxia_probs * 100.0
 
@@ -253,7 +288,7 @@ selected_hour = st.sidebar.slider("Advance Forecast Horizon (Hours)", min_value=
 st.sidebar.markdown("---")
 st.sidebar.subheader("Selected Hour Telemetry (+{}h)".format(selected_hour))
 st.sidebar.metric(label="Forecasted DO", value=f"{pred_dos[selected_hour]:.2f} mg/L")
-st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} C")
+st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} °C")
 st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
 st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
 st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
@@ -267,73 +302,73 @@ forecast_hours = [f"+{i}h" for i in range(24)]
 
 with tab1:
     fig = px.line(x=forecast_hours, y=pred_dos, labels={"x": "Forecast Horizon", "y": "Dissolved Oxygen (mg/L)"}, title="Dissolved Oxygen 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_dos[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_dos[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (C)"}, title="Water Temperature 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_temps[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
+    fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (°C)"}, title="Water Temperature 24-Hour Trajectory")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_temps[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
 with tab3:
     fig = px.line(x=forecast_hours, y=pred_phs, labels={"x": "Forecast Horizon", "y": "pH"}, title="pH 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_phs[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_phs[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
 with tab4:
     fig = px.line(x=forecast_hours, y=pred_salts, labels={"x": "Forecast Horizon", "y": "Salinity (PSU)"}, title="Salinity 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_salts[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_salts[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
+    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
 with tab5:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)'))
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[hypoxia_percentages[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
-    fig.add_hline(y=30.0, line_dash="dash", line_color="red", annotation_text="Crash Threshold (30%)", annotation_position="top right")
-    fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage")
+    fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)', line=dict(color='#3b82f6', width=3)))
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[hypoxia_percentages[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
+    fig.add_hline(y=30.0, line_dash="dash", line_color="#ef4444", annotation_text="Crash Threshold (30%)", annotation_position="top right")
+    fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
-st.subheader("Estuary Parameter Threshold Reference")
+st.markdown("### Estuary Parameter Threshold Reference")
 
 col_a, col_b, col_c, col_d = st.columns(4)
 
 with col_a:
     st.markdown("""
-    <div style="background-color: #d4edda; padding: 15px; border-radius: 5px; border-left: 5px solid #28a745;">
-        <h4 style="color: #155724; margin-top: 0;">Dissolved Oxygen</h4>
-        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> >= 5.0 mg/L</p>
-        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful (Hypoxic):</b> < 3.0 mg/L</p>
+    <div style="background-color: #f0fdf4; padding: 20px; border-radius: 10px; border-left: 6px solid #22c55e; border-top: 1px solid #bbf7d0; border-right: 1px solid #bbf7d0; border-bottom: 1px solid #bbf7d0;">
+        <h4 style="color: #166534; margin-top: 0; font-weight: 600;">Dissolved Oxygen</h4>
+        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> >= 5.0 mg/L</p>
+        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 3.0 mg/L</p>
     </div>
     """, unsafe_allow_html=True)
 
 with col_b:
     st.markdown("""
-    <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; border-left: 5px solid #ffc107;">
-        <h4 style="color: #856404; margin-top: 0;">Water Temperature</h4>
-        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 15.0C - 25.0C</p>
-        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful:</b> > 28.0C</p>
+    <div style="background-color: #fefce8; padding: 20px; border-radius: 10px; border-left: 6px solid #eab308; border-top: 1px solid #fef08a; border-right: 1px solid #fef08a; border-bottom: 1px solid #fef08a;">
+        <h4 style="color: #854d0e; margin-top: 0; font-weight: 600;">Water Temperature</h4>
+        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 15.0 - 25.0 °C</p>
+        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> > 28.0 °C</p>
     </div>
     """, unsafe_allow_html=True)
 
 with col_c:
     st.markdown("""
-    <div style="background-color: #d1ecf1; padding: 15px; border-radius: 5px; border-left: 5px solid #17a2b8;">
-        <h4 style="color: #0c5460; margin-top: 0;">pH Levels</h4>
-        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 7.5 - 8.5</p>
-        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful (Acidic):</b> < 7.3</p>
+    <div style="background-color: #ecfeff; padding: 20px; border-radius: 10px; border-left: 6px solid #06b6d4; border-top: 1px solid #a5f3fc; border-right: 1px solid #a5f3fc; border-bottom: 1px solid #a5f3fc;">
+        <h4 style="color: #155e75; margin-top: 0; font-weight: 600;">pH Levels</h4>
+        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 7.5 - 8.5</p>
+        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 7.3</p>
     </div>
     """, unsafe_allow_html=True)
 
 with col_d:
     st.markdown("""
-    <div style="background-color: #f8d7da; padding: 15px; border-radius: 5px; border-left: 5px solid #dc3545;">
-        <h4 style="color: #721c24; margin-top: 0;">Salinity</h4>
-        <p style="color: #155724; margin-bottom: 5px;"><b>Safe Range:</b> 15 - 30 PSU</p>
-        <p style="color: #721c24; margin-bottom: 0;"><b>Harmful:</b> < 10 PSU</p>
+    <div style="background-color: #fef2f2; padding: 20px; border-radius: 10px; border-left: 6px solid #ef4444; border-top: 1px solid #fecaca; border-right: 1px solid #fecaca; border-bottom: 1px solid #fecaca;">
+        <h4 style="color: #991b1b; margin-top: 0; font-weight: 600;">Salinity</h4>
+        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 15 - 30 PSU</p>
+        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 10 PSU</p>
     </div>
     """, unsafe_allow_html=True)
