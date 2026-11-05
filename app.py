@@ -109,21 +109,21 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
             'DO_mgL': base_do,
             'pH': base_pH,
             'salinity_PSU': base_sal,
-            'dDO_dt_1h': 0.0,
-            'dDO_dt_3h': 0.0,
-            'dDO_dt_6h': 0.0,
-            'dDO_dt_12h': 0.0,
+            'dDO_dt_1h': 0.1 * np.sin(2 * np.pi * hour_of_day / 24.0),
+            'dDO_dt_3h': 0.2 * np.sin(2 * np.pi * hour_of_day / 24.0),
+            'dDO_dt_6h': 0.3 * np.sin(2 * np.pi * hour_of_day / 24.0),
+            'dDO_dt_12h': 0.4 * np.sin(2 * np.pi * hour_of_day / 24.0),
             'dDO_dt_24h': 0.0,
-            'dpH_dt_3h': 0.0,
-            'dpH_dt_6h': 0.0,
-            'dDO_acceleration': 0.0,
+            'dpH_dt_3h': 0.05 * np.sin(2 * np.pi * hour_of_day / 24.0),
+            'dpH_dt_6h': 0.1 * np.sin(2 * np.pi * hour_of_day / 24.0),
+            'dDO_acceleration': 0.05,
             'DO_pH_ratio': do_pH_ratio,
             'DO_temp_ratio': do_temp_ratio,
             'DO_solubility_sat': do_solubility,
             'DO_saturation_ratio': do_sat_ratio,
             'DO_deficit': do_deficit,
-            'DO_std_12h': 0.2,
-            'DO_std_24h': 0.3,
+            'DO_std_12h': 0.3,
+            'DO_std_24h': 0.5,
             'pH_std_24h': 0.1,
             'sin_hour': np.sin(2 * np.pi * hour_of_day / 24.0),
             'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
@@ -206,12 +206,18 @@ else:
     raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
 hypoxia_percentages = raw_hypoxia_probs * 100.0
-max_hypoxia_pct = float(np.max(hypoxia_percentages))
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Estuary Risk Metrics")
-st.sidebar.metric(label="Peak Hypoxia Risk (24h)", value=f"{max_hypoxia_pct:.1f}%")
-user_threshold_pct = st.sidebar.slider("Crash Threshold Sensitivity (%)", min_value=1.0, max_value=99.0, value=30.0, step=1.0)
+st.sidebar.subheader("Forecast Time Control")
+selected_hour = st.sidebar.slider("Advance Forecast Horizon (Hours)", min_value=0, max_value=23, value=0, step=1)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Selected Hour Telemetry (+{}h)".format(selected_hour))
+st.sidebar.metric(label="Forecasted DO", value=f"{pred_dos[selected_hour]:.2f} mg/L")
+st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} °C")
+st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
+st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
+st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
 
@@ -219,28 +225,33 @@ forecast_hours = [f"+{i}h" for i in range(24)]
 
 with tab1:
     fig = px.line(x=forecast_hours, y=pred_dos, labels={"x": "Forecast Horizon", "y": "Dissolved Oxygen (mg/L)"}, title="Dissolved Oxygen 24-Hour Trajectory")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_dos[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
     fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (°C)"}, title="Water Temperature 24-Hour Trajectory")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_temps[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
     fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab3:
     fig = px.line(x=forecast_hours, y=pred_phs, labels={"x": "Forecast Horizon", "y": "pH"}, title="pH 24-Hour Trajectory")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_phs[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
     fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab4:
     fig = px.line(x=forecast_hours, y=pred_salts, labels={"x": "Forecast Horizon", "y": "Salinity (PSU)"}, title="Salinity 24-Hour Trajectory")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_salts[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
     fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True))
     st.plotly_chart(fig, use_container_width=True)
 
 with tab5:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)'))
-    fig.add_hline(y=user_threshold_pct, line_dash="dash", line_color="red", annotation_text=f"Threshold ({user_threshold_pct:.1f}%)", annotation_position="top right")
+    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[hypoxia_percentages[selected_hour]], mode='markers', marker=dict(size=14, color='red'), name='Selected Hour')
+    fig.add_hline(y=30.0, line_dash="dash", line_color="red", annotation_text="Crash Threshold (30%)", annotation_position="top right")
     fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage")
     st.plotly_chart(fig, use_container_width=True)
 
