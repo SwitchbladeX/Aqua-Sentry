@@ -11,8 +11,9 @@ st.set_page_config(
     page_icon="🦪",
     layout="wide"
 )
-st.title("🦪 Long Island Oyster AI Portal")
-st.markdown("Estuary telemetry and machine learning water quality forecasting system protecting *Crassostrea virginica*.")
+
+st.title("Long Island Oyster AI Portal")
+st.markdown("Estuary telemetry and machine learning water quality forecasting system protecting Crassostrea virginica.")
 
 STATIONS = {
     "Great South Bay Node (USGS 01305000)": {"site_code": "01305000", "lat": 40.65, "lon": -73.25},
@@ -30,6 +31,7 @@ def load_all_models():
         'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
     }
+    
     for key, path in model_paths.items():
         try:
             if key == 'hypoxia':
@@ -56,6 +58,7 @@ def fetch_live_usgs_telemetry(site_code):
         response = requests.get(url, timeout=10)
         data = response.json()
         series = data['value']['timeSeries']
+        
         latest_vals = {}
         for s in series:
             param_code = s['variable']['variableCode'][0]['value']
@@ -63,6 +66,7 @@ def fetch_live_usgs_telemetry(site_code):
             if values:
                 latest_val = float(values[-1]['value'])
                 latest_vals[param_code] = latest_val
+                
         return {
             'temp_C': latest_vals.get('00010', 18.5),
             'DO_mgL': latest_vals.get('00300', 6.20),
@@ -97,6 +101,7 @@ weather = fetch_open_meteo_weather(station_info['lat'], station_info['lon'])
 
 st.subheader("Live Estuary Telemetry")
 col1, col2, col3, col4 = st.columns(4)
+
 with col1:
     st.metric("Dissolved Oxygen", f"{telemetry['DO_mgL']:.2f} mg/L", delta="Optimal" if telemetry['DO_mgL'] > 5.0 else "Warning")
 with col2:
@@ -109,19 +114,23 @@ with col4:
 now = datetime.now()
 hour = now.hour
 doy = now.timetuple().tm_yday
+
 sin_hour = np.sin(2 * np.pi * hour / 24.0)
 cos_hour = np.cos(2 * np.pi * hour / 24.0)
 sin_season = np.sin(2 * np.pi * doy / 365.25)
 cos_season = np.cos(2 * np.pi * doy / 365.25)
+
 thermal_gradient = weather['air_temp_C'] - telemetry['temp_C']
 dDO_dt_3h = 0.0
 dDO_dt_6h = 0.0
 dDO_acceleration = 0.0
+
 temp = telemetry['temp_C']
 DO_solubility_sat = 14.652 - (0.41022 * temp) + (0.007991 * (temp**2)) - (0.000077774 * (temp**3))
 DO_deficit = DO_solubility_sat - telemetry['DO_mgL']
 DO_std_12h = 0.25
 pH_std_12h = 0.05
+
 site_code_cat = list(STATIONS.keys()).index(selected_station_name)
 
 horizons = list(range(1, 25))
@@ -151,6 +160,7 @@ for h in horizons:
         'site_code_cat': float(site_code_cat),
         'horizon': float(h)
     }])
+
     for param in forecasts.keys():
         if models[param] is not None:
             pred = models[param].predict(input_features)[0]
@@ -160,17 +170,31 @@ for h in horizons:
 
 hypoxia_prob = 0.0
 if models['hypoxia'] is not None:
-    clf_features = input_features.drop(columns=['horizon'])
-    hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
+    try:
+        clf_features = input_features.drop(columns=['horizon'])
+        if hasattr(models['hypoxia'], 'feature_names_in_'):
+            expected_features = models['hypoxia'].feature_names_in_
+            clf_features_aligned = pd.DataFrame(columns=expected_features)
+            for col in expected_features:
+                if col in clf_features.columns:
+                    clf_features_aligned[col] = clf_features[col]
+                else:
+                    clf_features_aligned[col] = 0.0
+            hypoxia_prob = models['hypoxia'].predict_proba(clf_features_aligned)[0][1]
+        else:
+            hypoxia_prob = models['hypoxia'].predict_proba(clf_features)[0][1]
+    except Exception:
+        hypoxia_prob = 0.0
 
 st.markdown("---")
 st.subheader("24-Hour Hypoxia Early Warning System")
 if hypoxia_prob > 0.40:
-    st.error(f"⚠️ **HIGH HYPOXIA CRASH RISK DETECTED**: {hypoxia_prob * 100:.1f}% probability of DO dropping below 3.0 mg/L in the next 24 hours. Consider deploying aeration or adjusting harvesting schedules.")
+    st.error(f"HIGH HYPOXIA CRASH RISK DETECTED: {hypoxia_prob * 100:.1f}% probability of DO dropping below 3.0 mg/L in the next 24 hours. Consider deploying aeration or adjusting harvesting schedules.")
 else:
-    st.success(f"✅ **NORMAL ESTUARY CONDITIONS**: Hypoxia risk is low ({hypoxia_prob * 100:.1f}% probability).")
+    st.success(f"NORMAL ESTUARY CONDITIONS: Hypoxia risk is low ({hypoxia_prob * 100:.1f}% probability).")
 
 st.subheader("24-Hour Multi-Parameter AI Forecast Trajectories")
+
 tab1, tab2, tab3, tab4 = st.tabs(["Dissolved Oxygen", "Water Temperature", "pH", "Salinity"])
 
 with tab1:
