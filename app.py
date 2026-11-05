@@ -95,23 +95,40 @@ def generate_forecast_features(base_features, hours=24, site_cat_id=0):
     for i in range(hours):
         step_time = current_time + datetime.timedelta(hours=i)
         hour_of_day = step_time.hour
+        day_of_year = step_time.timetuple().tm_yday
         
         temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        do_solubility = 14.6204 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
+        do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
         do_deficit = max(0.0, do_solubility - base_do)
+        do_sat_ratio = base_do / (do_solubility + 1e-5)
+        do_pH_ratio = base_do / (base_pH + 1e-5)
+        do_temp_ratio = base_do / (temp_est + 1e-5)
         
         row = {
             'temp_C': temp_est,
             'DO_mgL': base_do,
             'pH': base_pH,
             'salinity_PSU': base_sal,
+            'dDO_dt_1h': 0.0,
             'dDO_dt_3h': 0.0,
             'dDO_dt_6h': 0.0,
+            'dDO_dt_12h': 0.0,
+            'dDO_dt_24h': 0.0,
+            'dpH_dt_3h': 0.0,
+            'dpH_dt_6h': 0.0,
             'dDO_acceleration': 0.0,
+            'DO_pH_ratio': do_pH_ratio,
+            'DO_temp_ratio': do_temp_ratio,
             'DO_solubility_sat': do_solubility,
+            'DO_saturation_ratio': do_sat_ratio,
             'DO_deficit': do_deficit,
+            'DO_std_12h': 0.2,
+            'DO_std_24h': 0.3,
+            'pH_std_24h': 0.1,
             'sin_hour': np.sin(2 * np.pi * hour_of_day / 24.0),
             'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
+            'sin_day': np.sin(2 * np.pi * day_of_year / 365.25),
+            'cos_day': np.cos(2 * np.pi * day_of_year / 365.25),
             'site_code_cat': site_cat_id
         }
         
@@ -177,8 +194,11 @@ forecast_df_hypoxia["temp_C"] = pred_temps
 forecast_df_hypoxia["DO_mgL"] = pred_dos
 forecast_df_hypoxia["pH"] = pred_phs
 forecast_df_hypoxia["salinity_PSU"] = pred_salts
-forecast_df_hypoxia["DO_solubility_sat"] = 14.6204 - 0.41022 * pred_temps + 0.007991 * (pred_temps**2) - 0.000077774 * (pred_temps**3)
+forecast_df_hypoxia["DO_solubility_sat"] = 14.652 - (0.41022 * pred_temps) + (0.007991 * (pred_temps**2)) - (0.000077774 * (pred_temps**3))
 forecast_df_hypoxia["DO_deficit"] = np.maximum(0.0, forecast_df_hypoxia["DO_solubility_sat"] - pred_dos)
+forecast_df_hypoxia["DO_saturation_ratio"] = pred_dos / (forecast_df_hypoxia["DO_solubility_sat"] + 1e-5)
+forecast_df_hypoxia["DO_pH_ratio"] = pred_dos / (pred_phs + 1e-5)
+forecast_df_hypoxia["DO_temp_ratio"] = pred_dos / (pred_temps + 1e-5)
 
 if hasattr(models["hypoxia"], "predict_proba"):
     raw_hypoxia_probs = align_and_predict_proba(models["hypoxia"], forecast_df_hypoxia)[:, 1]
@@ -190,8 +210,8 @@ max_hypoxia_pct = float(np.max(hypoxia_percentages))
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Estuary Risk Metrics")
-st.sidebar.metric(label="Peak Hypoxia Risk (24h)", value=f"{max_hypoxia_pct:.1f}%", delta="Threshold: 30.0%" if max_hypoxia_pct >= 30.0 else "Normal Range", delta_color="inverse" if max_hypoxia_pct >= 30.0 else "normal")
-st.sidebar.slider("Hypoxia Crash Probability (%)", min_value=0.0, max_value=100.0, value=max_hypoxia_pct, disabled=True)
+st.sidebar.metric(label="Peak Hypoxia Risk (24h)", value=f"{max_hypoxia_pct:.1f}%")
+user_threshold_pct = st.sidebar.slider("Crash Threshold Sensitivity (%)", min_value=1.0, max_value=99.0, value=30.0, step=1.0)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
 
@@ -220,7 +240,7 @@ with tab4:
 with tab5:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)'))
-    fig.add_hline(y=30.0, line_dash="dash", line_color="red", annotation_text="Crash Threshold (30%)", annotation_position="top right")
+    fig.add_hline(y=user_threshold_pct, line_dash="dash", line_color="red", annotation_text=f"Threshold ({user_threshold_pct:.1f}%)", annotation_position="top right")
     fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -229,7 +249,7 @@ st.subheader("Estuary Parameter Guidelines & Oyster Health Reference")
 st.markdown("""
 * **Dissolved Oxygen (DO):** 
   * **Safe / Fine:** Above 5.0 mg/L. Oysters breathe comfortably and maintain metabolic activity.
-  * **Hazardous / Bad:** Below 3.0 mg/L. Induces severe hypoxia, metabolic stress, and potential mortality if prolonged. This is the core threshold tracked by the classifier.
+  * **Hazardous / Bad:** Below 3.0 mg/L. Induces severe hypoxia, metabolic stress, and potential mortality if prolonged.
 * **Water Temperature:** 
   * **Safe / Fine:** 15°C to 25°C. Optimal feeding and growth range for *Crassostrea virginica*.
   * **Hazardous / Bad:** Above 28°C. Drastically increases oxygen consumption rates while lowering dissolved oxygen solubility in water.
