@@ -73,6 +73,16 @@ def align_and_predict(model, input_df):
         input_df = input_df[feature_names]
     return model.predict(input_df)
 
+def align_and_predict_proba(model, input_df):
+    booster = model.get_booster()
+    feature_names = booster.feature_names
+    if feature_names:
+        for col in feature_names:
+            if col not in input_df.columns:
+                input_df[col] = 0.0
+        input_df = input_df[feature_names]
+    return model.predict_proba(input_df)
+
 def generate_forecast_features(base_features, hours=24):
     future_rows = []
     current_time = datetime.datetime.now()
@@ -154,7 +164,7 @@ forecast_df_hypoxia["pH"] = pred_phs
 forecast_df_hypoxia["salinity_PSU"] = pred_salts
 
 if hasattr(models["hypoxia"], "predict_proba"):
-    pred_hypoxia = models["hypoxia"].predict_proba(forecast_df_hypoxia)[:, 1]
+    pred_hypoxia = align_and_predict_proba(models["hypoxia"], forecast_df_hypoxia)[:, 1]
 else:
     pred_hypoxia = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
 
