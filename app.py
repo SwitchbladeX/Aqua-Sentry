@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Long Island Oyster AI Portal",
-    page_icon="🦪",
     layout="wide"
 )
 
@@ -27,7 +26,7 @@ def load_all_models():
     model_paths = {
         'DO_mgL': 'xgb_do_regression_weather_model(FINAL).json',
         'temp_C': 'xgb_temp_C_regression_model(FINAL).json',
-        'pH': 'xgb_pH_regression_model(FINAL).json',
+        'pH': 'xgb_pH_regression_weather_model(FINAL).json',
         'salinity_PSU': 'xgb_salinity_PSU_regression_model(FINAL).json',
         'hypoxia': 'xgb_hypoxia_weather_model(FINAL).json'
     }
@@ -103,7 +102,7 @@ st.subheader("Live Estuary Telemetry")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("Dissolved Oxygen", f"{telemetry['DO_mgL']:.2f} mg/L", delta="Optimal" if telemetry['DO_mgL'] > 5.0 else "Warning")
+    st.metric("Dissolved Oxygen", f"{telemetry['DO_mgL']:.2f} mg/L")
 with col2:
     st.metric("Water Temperature", f"{telemetry['temp_C']:.2f} °C")
 with col3:
@@ -189,7 +188,7 @@ if models['hypoxia'] is not None:
 st.markdown("---")
 st.subheader("24-Hour Hypoxia Early Warning System")
 if hypoxia_prob > 0.40:
-    st.error(f"HIGH HYPOXIA CRASH RISK DETECTED: {hypoxia_prob * 100:.1f}% probability of DO dropping below 3.0 mg/L in the next 24 hours. Consider deploying aeration or adjusting harvesting schedules.")
+    st.error(f"HIGH HYPOXIA CRASH RISK DETECTED: {hypoxia_prob * 100:.1f}% probability of DO dropping below 3.0 mg/L in the next 24 hours.")
 else:
     st.success(f"NORMAL ESTUARY CONDITIONS: Hypoxia risk is low ({hypoxia_prob * 100:.1f}% probability).")
 
@@ -200,7 +199,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["Dissolved Oxygen", "Water Temperature", "pH",
 with tab1:
     fig_do = go.Figure()
     fig_do.add_trace(go.Scatter(x=horizons, y=forecasts['DO_mgL'], mode='lines+markers', name='Predicted DO (mg/L)', line=dict(color='#008080', width=3)))
-    fig_do.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Hypoxia Threshold (3.0 mg/L)")
+    fig_do.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Hypoxia Threshold")
     fig_do.update_layout(xaxis_title="Forecast Horizon (Hours Ahead)", yaxis_title="Dissolved Oxygen (mg/L)", height=400)
     st.plotly_chart(fig_do, use_container_width=True)
 
