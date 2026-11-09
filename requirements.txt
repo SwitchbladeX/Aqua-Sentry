@@ -4,3 +4,4 @@ numpy
 xgboost
 plotly
 requests
+scikit-learn>=1.3
