@@ -36,21 +36,22 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
 :root { color-scheme: light; }
-.stApp {background:linear-gradient(145deg,#f3faf7 0%,#f3f7fb 52%,#eef7f7 100%); color:#17324d;}
+.stApp {background:linear-gradient(145deg,#f3f8ff 0%,#f6f9fd 52%,#edf5ff 100%);color:#18324b;}
 [data-testid="stHeader"] {background:transparent;}
-[data-testid="stSidebar"] {background:#123b3a;}
-[data-testid="stSidebar"] * {color:#f3fbf7 !important;}
-[data-testid="stSidebar"] input,[data-testid="stSidebar"] [data-baseweb="select"] > div {background:white !important;color:#17324d !important;}
-[data-testid="stSidebar"] [data-baseweb="select"] span {color:#17324d !important;}
-[data-testid="stMetric"] {background:white;border:1px solid #dcebe5;padding:16px 18px;border-radius:16px;box-shadow:0 6px 20px rgba(27,72,65,.06);}
-[data-testid="stMetricLabel"] {color:#58736e !important;font-weight:600;}
-[data-testid="stMetricValue"] {color:#173b48;}
-[data-testid="stExpander"] {background:white;border:1px solid #dcebe5;border-radius:14px;}
-.stButton > button,.stDownloadButton > button {background:#15866d !important;color:white !important;border:0;border-radius:10px;font-weight:700;}
-[data-testid="stCaptionContainer"] {color:#607779 !important;}
-.hero {padding:24px 28px;border-radius:20px;background:linear-gradient(115deg,#123b3a,#176c62 58%,#238a74);color:white;margin:4px 0 22px;box-shadow:0 12px 30px rgba(18,75,67,.16);}
-.hero h1 {font-size:2.35rem;margin:0;color:white;letter-spacing:-.04em;}
-.hero p {margin:8px 0 0;color:#d9f3e8;font-size:1.04rem;}
+.block-container {padding-top:1rem;padding-bottom:2rem;max-width:1500px;}
+[data-testid="stSidebar"] {background:linear-gradient(180deg,#123b64,#164b78);}
+[data-testid="stSidebar"] * {color:#f3f8ff !important;}
+[data-testid="stSidebar"] input,[data-testid="stSidebar"] [data-baseweb="select"] > div {background:white !important;color:#18324b !important;}
+[data-testid="stSidebar"] [data-baseweb="select"] span {color:#18324b !important;}
+[data-testid="stMetric"] {background:white;border:1px solid #d8e6f4;padding:16px 18px;border-radius:16px;box-shadow:0 6px 20px rgba(31,82,128,.07);}
+[data-testid="stMetricLabel"] {color:#58738d !important;font-weight:600;}
+[data-testid="stMetricValue"] {color:#183b5a;}
+[data-testid="stExpander"] {background:white;border:1px solid #d8e6f4;border-radius:14px;}
+.stButton > button,.stDownloadButton > button {background:#1769aa !important;color:white !important;border:0;border-radius:10px;font-weight:700;}
+.stButton > button:hover {background:#105487 !important;}
+[data-testid="stCaptionContainer"] {color:#60778d !important;}
+.hero {padding:17px 26px;border-radius:18px;background:linear-gradient(112deg,#123b64,#1769aa 58%,#328cc4);color:white;margin:0 0 18px;box-shadow:0 10px 28px rgba(23,75,120,.18);}
+.hero h1 {font-size:2.2rem;margin:0;color:white;letter-spacing:-.04em;line-height:1.2;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -184,11 +185,9 @@ def make_forecast(history: pd.DataFrame, station: str, assets):
                 if names and names!=FEATURE_COLUMNS: raise ValueError(f"{meta['prefix']}_{horizon}h model feature order differs from app schema.")
                 candidate=float(model.predict(make_features(history,origin))[0])
                 if key=="salinity":
-                    # The committed salinity validation errors are orders of magnitude below PSU-scale
-                    # measurements. Avoid presenting a likely normalized-target output as PSU.
                     baseline=float(history[col].dropna().tail(24).median())
                     if baseline>5 and candidate < baseline*0.5:
-                        source="Salinity scale guard · persistence fallback"
+                        source="Persistence (salinity model scale guard)"
                     else:
                         value=candidate; source="XGBoost"
                 else:
@@ -196,7 +195,7 @@ def make_forecast(history: pd.DataFrame, station: str, assets):
             forecasts.append({"variable":key,"label":label,"horizon":horizon,"timestamp":origin+pd.Timedelta(hours=horizon),"prediction":value,"method_source":source,"origin":origin})
     return pd.DataFrame(forecasts)
 
-st.markdown('<div class="hero"><h1>Water Management AI</h1><p>Estuary conditions at a glance · observations and 24-hour outlook</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>🌊 Water Management AI</h1></div>', unsafe_allow_html=True)
 with st.sidebar:
     st.header("Monitoring station")
     choice=st.selectbox("USGS station",list(STATIONS))
@@ -231,27 +230,26 @@ except Exception as exc:
 
 origin=forecast["origin"].iloc[0]
 start,end=origin-pd.Timedelta(hours=24),origin+pd.Timedelta(hours=24)
-fig=make_subplots(rows=4,cols=1,shared_xaxes=True,vertical_spacing=.105)
-colors={"observed":"#13866f","forecast":"#3976c5","alert":"#dc5a55"}
+fig=make_subplots(rows=4,cols=1,shared_xaxes=True,vertical_spacing=.11)
+colors={"observed":"#1769aa","forecast":"#53a4dc"}
 for row,(label,meta) in enumerate(VARIABLES.items(),start=1):
     col=meta["column"]
     observed=history.loc[(history.index>=start)&(history.index<=origin),col].dropna()
     subset=forecast[forecast.variable==meta["key"]].sort_values("horizon")
-    fig.add_annotation(xref="paper",yref=f"y{row} domain",x=0.012,y=.94,text=f"<b>{label}</b>  <span style='color:#71858a'>({meta['unit']})</span>",showarrow=False,xanchor="left",font={"size":13,"color":"#24495b"})
     if not observed.empty:
         fig.add_trace(go.Scatter(x=observed.index,y=observed.values,mode="lines",name="Observed",legendgroup="observed",showlegend=row==1,line={"color":colors["observed"],"width":2.8},hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}<extra>Observed</extra>"),row=row,col=1)
-    salinity_fallback=subset["method_source"].str.contains("scale guard") if meta["key"]=="salinity" else pd.Series(False,index=subset.index)
-    forecast_ok=subset[~salinity_fallback]
-    if not forecast_ok.empty:
-        fig.add_trace(go.Scatter(x=forecast_ok.timestamp,y=forecast_ok.prediction,mode="lines+markers",name="24h outlook",legendgroup="forecast",showlegend=row==1,line={"color":colors["forecast"],"width":2.5,"dash":"dash"},marker={"size":5},hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}<extra>Forecast</extra>"),row=row,col=1)
-    fig.update_yaxes(title_text=meta["unit"],row=row,col=1,gridcolor="#e7efef",zerolinecolor="#d8e5e3")
+    if not subset.empty:
+        fig.add_trace(go.Scatter(x=subset.timestamp,y=subset.prediction,mode="lines+markers",name="24h outlook",legendgroup="forecast",showlegend=row==1,line={"color":colors["forecast"],"width":2.5,"dash":"dash"},marker={"size":5},hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}<extra>Forecast</extra>"),row=row,col=1)
+    # Use axis titles rather than manually anchored annotations; this works across Plotly versions
+    # and keeps subplot labels separated from the plotted data.
+    fig.update_yaxes(title_text=f"{label}<br>({meta['unit']})",row=row,col=1,gridcolor="#e3edf6",zerolinecolor="#d4e2ef",title_font={"size":12})
 fig.add_vline(x=origin,line_width=1.5,line_dash="dot",line_color="#e4a43b")
-fig.add_annotation(x=origin,y=1.02,xref="x",yref="paper",text="NOW",showarrow=False,font={"size":10,"color":"#9b6818"},bgcolor="#fff7e6",borderpad=4)
-fig.update_xaxes(range=[start,end],title_text="Time (UTC)",row=4,col=1,gridcolor="#edf2f2")
-fig.update_layout(height=1040,hovermode="x unified",plot_bgcolor="white",paper_bgcolor="rgba(255,255,255,0)",font={"family":"DM Sans, sans-serif","color":"#29495b"},legend={"orientation":"h","y":1.045,"x":.7},margin={"t":80,"b":45,"l":65,"r":22})
+fig.add_annotation(x=origin,y=1.015,xref="x",yref="paper",text="NOW",showarrow=False,font={"size":10,"color":"#805916"},bgcolor="#fff7e6",borderpad=4)
+fig.update_xaxes(range=[start,end],title_text="Time (UTC)",row=4,col=1,gridcolor="#edf2f8")
+fig.update_layout(height=1080,hovermode="x unified",plot_bgcolor="white",paper_bgcolor="rgba(255,255,255,0)",font={"family":"DM Sans, sans-serif","color":"#29495b"},legend={"orientation":"h","y":1.045,"x":.7},margin={"t":80,"b":45,"l":125,"r":22})
 st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False})
 if forecast["method_source"].str.contains("scale guard").any():
-    st.warning("Salinity model outputs are on a scale inconsistent with the recent PSU observations. The app is using persistence for affected hours rather than displaying an untrustworthy converted value. Retrain the salinity models with PSU targets to restore the model outlook.")
+    st.warning("Salinity model outputs are on a scale inconsistent with recent PSU observations. Persistence is shown for affected forecast hours instead of an unreliable model value. Retrain the salinity models with PSU targets to restore the model outlook.")
 with st.expander("Data sources and forecast details"):
     source_rows=[]
     for label,meta in VARIABLES.items():
@@ -259,5 +257,5 @@ with st.expander("Data sources and forecast details"):
         source_rows.append({"Parameter":label,"Latest source":source_notes.get(meta["column"],"USGS NWIS"),"Latest observation (UTC)":valid.index[-1].strftime("%Y-%m-%d %H:%M") if not valid.empty else "Unavailable","Hourly observations":int(valid.size)})
     st.dataframe(pd.DataFrame(source_rows),use_container_width=True,hide_index=True)
     for note in source_notes.values(): st.caption(note)
-    st.caption("Green lines show observed readings; blue dashed lines show forecasts. Red is reserved for flagged conditions. Forecasts are not a substitute for field measurements.")
+    st.caption("Blue solid lines show observed readings; lighter blue dashed lines show forecasts. Forecasts are not a substitute for field measurements.")
 st.caption("Forecasts use XGBoost or persistence based on the station validation hierarchy. All timestamps are UTC.")
