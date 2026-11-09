@@ -1,440 +1,597 @@
+from __future__ import annotations
+
+import re
+import warnings
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import requests
 import streamlit as st
 import xgboost as xgb
-import pandas as pd
-import numpy as np
-import requests
-import datetime
-import plotly.express as px
-import plotly.graph_objects as go
 
-st.set_page_config(page_title="Long Island Estuary Water Quality Portal", layout="wide")
+st.set_page_config(
+    page_title="Long Island Estuary Water Quality Portal",
+    page_icon="🌊",
+    layout="wide",
+)
+
+ROOT = Path(__file__).resolve().parent
+MODEL_ROOT = ROOT / "models"
+VARIABLES = {
+    "Dissolved oxygen": {
+        "key": "do", "folder": "dissolved_oxygen", "prefix": "DO",
+        "column": "DO_mgL", "unit": "mg/L", "usgs_code": "00300",
+        "noaa_product": None,
+    },
+    "Temperature": {
+        "key": "temp", "folder": "temperature", "prefix": "Temp",
+        "column": "temp_C", "unit": "°C", "usgs_code": "00010",
+        "noaa_product": "water_temperature",
+    },
+    "pH": {
+        "key": "ph", "folder": "ph", "prefix": "pH",
+        "column": "pH", "unit": "pH", "usgs_code": "00400",
+        "noaa_product": None,
+    },
+    "Salinity": {
+        "key": "salinity", "folder": "salinity", "prefix": "Salinity",
+        "column": "salinity_PSU", "unit": "PSU", "usgs_code": "00480",
+        "noaa_product": "salinity",
+    },
+}
+VALUE_COLUMNS = ["DO_mgL", "temp_C", "pH", "salinity_PSU"]
+LAGS = [1, 3, 6, 12]
+FEATURE_COLUMNS = (
+    VALUE_COLUMNS
+    + [f"{col}_lag{lag}h" for col in VALUE_COLUMNS for lag in LAGS]
+    + ["hour", "month"]
+)
+HIERARCHY_FILES = {
+    "do": "DO_VALIDATION_HIERARCHY.csv",
+    "temp": "TEMP_VALIDATION_HIERARCHY.csv",
+    "ph": "PH_VALIDATION_HIERARCHY.csv",
+    "salinity": "SALINITY_VALIDATION_HIERARCHY.csv",
+}
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    
-    .main {
-        background-color: #f8fafc;
-    }
-    
-    [data-testid="stSidebar"] {
-        background-color: #0f172a;
-        color: #ffffff;
-    }
-    
-    [data-testid="stSidebar"] label, 
-    [data-testid="stSidebar"] .stSubheader, 
-    [data-testid="stSidebar"] .stMarkdown,
-    [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] span,
-    [data-testid="stSidebar"] div {
-        color: #ffffff !important;
-    }
-    
-    [data-testid="stSidebar"] .stTextInput input,
-    [data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] {
-        color: #000000 !important;
-    }
+    html, body, [class*="css"] { font-family: Inter, sans-serif; }
+    .stApp { background: #f7f9fc; }
+    [data-testid="stSidebar"] { background: #102238; }
+    [data-testid="stSidebar"] * { color: #f8fafc; }
+    [data-testid="stSidebar"] input { color: #172033 !important; }
+    .small-note { color: #64748b; font-size: 0.88rem; }
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource
-def load_all_models():
-    models = {}
-    model_files = {
-        "do": "xgb_do_regression_weather_model(FINAL) (1).json",
-        "temp": "xgb_temp_C_regression_weather_model(FINAL) (1).json",
-        "pH": "xgb_pH_regression_weather_model(FINAL) (1).json",
-        "salinity": "xgb_salinity_PSU_regression_weather_model(FINAL) (1).json",
-        "hypoxia": "xgb_hypoxia_weather_model(FINAL).json"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_usgs_history(site_id: str, days: int = 90) -> pd.DataFrame:
+    """Retrieve USGS instantaneous values; no synthetic values are created."""
+    url = "https://waterservices.usgs.gov/nwis/iv/"
+    params = {
+        "format": "json",
+        "sites": site_id,
+        "parameterCd": "00010,00300,00400,00480",
+        "period": f"P{days}D",
     }
-    
-    for key, filename in model_files.items():
-        if key == "hypoxia":
-            model = xgb.XGBClassifier()
-        else:
-            model = xgb.XGBRegressor()
-            
+    response = requests.get(
+        url, params=params, timeout=45,
+        headers={"User-Agent": "LongIslandEstuaryWaterQualityPortal/1.0"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    series = payload.get("value", {}).get("timeSeries", [])
+    if not series:
+        raise ValueError("USGS returned no instantaneous-value series for this station.")
+
+    pieces = []
+    code_to_column = {v["usgs_code"]: v["column"] for v in VARIABLES.values()}
+    for item in series:
+        codes = item.get("variable", {}).get("variableCode", [])
+        if not codes:
+            continue
+        code = codes[0].get("value")
+        column = code_to_column.get(code)
+        if not column:
+            continue
+        value_groups = item.get("values", [])
+        if not value_groups:
+            continue
+        observations = value_groups[0].get("value", [])
+        if not observations:
+            continue
+        part = pd.DataFrame(observations)
+        if not {"dateTime", "value"}.issubset(part.columns):
+            continue
+        part["timestamp"] = pd.to_datetime(part["dateTime"], utc=True, errors="coerce")
+        part[column] = pd.to_numeric(part["value"], errors="coerce")
+        part = part[["timestamp", column]].dropna(subset=["timestamp"])
+        part = part.set_index("timestamp")
+        pieces.append(part.groupby(level=0).median(numeric_only=True))
+
+    if not pieces:
+        raise ValueError("USGS returned data, but no supported parameter series could be parsed.")
+    raw = pd.concat(pieces, axis=1)
+    raw = raw.groupby(level=0).median(numeric_only=True).sort_index()
+    raw = raw.loc[:, ~raw.columns.duplicated()]
+    raw.attrs["source"] = "USGS NWIS instantaneous values"
+    return raw
+
+
+def fetch_noaa_product(station_id: str, product: str, days: int = 90) -> pd.Series:
+    """Retrieve compatible NOAA CO-OPS hourly temperature or salinity."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    params = {
+        "product": product,
+        "application": "LongIslandEstuaryWaterQualityPortal",
+        "begin_date": start.strftime("%Y%m%d"),
+        "end_date": end.strftime("%Y%m%d"),
+        "station": station_id,
+        "time_zone": "gmt",
+        "units": "metric",
+        "format": "json",
+        "interval": "h",
+    }
+    url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+    response = requests.get(url, params=params, timeout=45)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        raise ValueError(payload["error"].get("message", "NOAA returned an API error."))
+    rows = payload.get("data", [])
+    if not rows:
+        raise ValueError(f"NOAA returned no {product} observations for station {station_id}.")
+    frame = pd.DataFrame(rows)
+    value_key = "v"
+    if value_key not in frame:
+        raise ValueError(f"NOAA response did not contain a value field for {product}.")
+    frame["timestamp"] = pd.to_datetime(frame["t"], utc=True, errors="coerce")
+    frame["value"] = pd.to_numeric(frame[value_key], errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "value"]).set_index("timestamp")
+    return frame["value"].groupby(level=0).median().sort_index()
+
+
+def merge_optional_noaa(
+    history: pd.DataFrame, noaa_station: str, days: int
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Use NOAA only for temperature/salinity, only when user supplies a station ID."""
+    sources = {col: "USGS NWIS" for col in history.columns}
+    if not noaa_station.strip():
+        return history, sources
+
+    result = history.copy()
+    for col, product in [("temp_C", "water_temperature"), ("salinity_PSU", "salinity")]:
+        if col in result.columns and result[col].notna().sum() > 0:
+            continue
         try:
-            model.load_model(filename)
-            models[key] = model
-        except Exception as e:
-            st.error(f"Failed to load model file {filename}: {e}")
-            raise e
-            
-    return models
+            series = fetch_noaa_product(noaa_station.strip(), product, days)
+            result[col] = series.reindex(result.index)
+            sources[col] = f"NOAA CO-OPS ({product})"
+        except Exception as exc:
+            sources[col] = f"Unavailable from USGS; NOAA fallback failed: {exc}"
+    return result, sources
 
-def convert_conductance_to_salinity(cond):
-    if cond <= 0:
-        return 0.0
-    r = cond / 53087.0
-    sal = (0.0080 - (0.1692 * np.sqrt(r)) + (25.3851 * r) + 
-           (14.0941 * (r**1.5)) - (7.0261 * (r**2)) + (2.7081 * (r**2.5)))
-    return float(np.clip(sal, 0.0, 40.0))
 
-def fetch_usgs_station_history(station_id, days=3):
-    url = f"https://waterservices.usgs.gov/nwis/iv/?format=json&sites={station_id}&parameterCd=00010,00300,00400,00095&period=P{days}D"
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise RuntimeError(f"USGS API request failed with status code {response.status_code}")
-    
-    data = response.json()
-    time_series = data.get("value", {}).get("timeSeries", [])
-    if not time_series:
-        raise ValueError(f"No time series data returned for station {station_id}")
-        
-    dfs = []
-    param_map = {
-        "00010": "temp_C",
-        "00300": "DO_mgL",
-        "00400": "pH",
-        "00095": "salinity_PSU"
+def load_uploaded_sensor_csv(uploaded_file) -> pd.DataFrame:
+    """Accept a timestamp column and any subset of the four model variables."""
+    frame = pd.read_csv(uploaded_file)
+    aliases = {
+        "timestamp": "timestamp", "datetime": "timestamp", "date_time": "timestamp",
+        "date": "timestamp", "time": "timestamp",
+        "do_mgl": "DO_mgL", "do": "DO_mgL", "dissolved_oxygen": "DO_mgL",
+        "temp_c": "temp_C", "temperature": "temp_C",
+        "ph": "pH", "salinity_psu": "salinity_PSU", "salinity": "salinity_PSU",
     }
-    
-    for ts in time_series:
-        var_code = ts["variable"]["variableCode"][0]["value"]
-        values = ts.get("values", [])[0].get("value", [])
-        if values:
-            temp_df = pd.DataFrame(values)[["dateTime", "value"]]
-            temp_df["dateTime"] = pd.to_datetime(temp_df["dateTime"])
-            temp_df["value"] = temp_df["value"].astype(float)
-            
-            col_name = param_map.get(var_code, var_code)
-            temp_df = temp_df.rename(columns={"value": col_name})
-            dfs.append(temp_df.set_index("dateTime"))
-            
-    if not dfs:
-        raise ValueError(f"Failed to parse time series parameters for station {station_id}")
-        
-    combined_df = pd.concat(dfs, axis=1).sort_index().ffill().bfill()
-    
-    if "salinity_PSU" in combined_df.columns:
-        if combined_df["salinity_PSU"].mean() > 100:
-            combined_df["salinity_PSU"] = combined_df["salinity_PSU"].apply(convert_conductance_to_salinity)
-            
-    required_cols = ["temp_C", "DO_mgL", "pH", "salinity_PSU"]
-    for col in required_cols:
-        if col not in combined_df.columns:
-            combined_df[col] = 0.0
-            
-    return combined_df.dropna(subset=["DO_mgL", "temp_C"])
+    rename = {}
+    for col in frame.columns:
+        normalized = re.sub(r"[^a-z0-9_]", "", str(col).strip().lower())
+        if normalized in aliases:
+            rename[col] = aliases[normalized]
+    frame = frame.rename(columns=rename)
+    if "timestamp" not in frame:
+        raise ValueError("CSV needs a timestamp column (timestamp, datetime, date_time, date, or time).")
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["timestamp"]).set_index("timestamp")
+    for col in VALUE_COLUMNS:
+        if col in frame:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    usable = [c for c in VALUE_COLUMNS if c in frame]
+    if not usable:
+        raise ValueError("CSV must contain at least one recognized water-quality column.")
+    return frame[usable].sort_index()
 
-def compute_wqi(do, temp, ph, salinity):
-    sub_do = 100.0 if do >= 5.0 else max(0.0, (do / 5.0) * 100.0)
-    
-    if 15.0 <= temp <= 25.0:
-        sub_temp = 100.0
-    elif temp < 15.0:
-        sub_temp = max(0.0, (temp / 15.0) * 100.0)
+
+def build_hourly_history(raw: pd.DataFrame) -> pd.DataFrame:
+    """Hourly median; missing hours remain missing, never blanket-filled."""
+    if raw.empty:
+        raise ValueError("No observations were returned.")
+    frame = raw.copy()
+    if frame.index.tz is None:
+        frame.index = frame.index.tz_localize("UTC")
     else:
-        sub_temp = max(0.0, 100.0 - ((temp - 25.0) / 10.0) * 100.0)
-        
-    if 7.5 <= ph <= 8.5:
-        sub_ph = 100.0
-    else:
-        dev = min(abs(ph - 7.5), abs(ph - 8.5))
-        sub_ph = max(0.0, 100.0 - (dev / 1.5) * 100.0)
-        
-    if 15.0 <= salinity <= 30.0:
-        sub_sal = 100.0
-    elif salinity < 15.0:
-        sub_sal = max(0.0, (salinity / 15.0) * 100.0)
-    else:
-        sub_sal = max(0.0, 100.0 - ((salinity - 30.0) / 10.0) * 100.0)
-        
-    wqi = (sub_do * 0.40) + (sub_temp * 0.20) + (sub_ph * 0.20) + (sub_sal * 0.20)
-    return float(np.clip(wqi, 0.0, 100.0))
+        frame.index = frame.index.tz_convert("UTC")
+    frame = frame.sort_index()
+    frame = frame[~frame.index.duplicated(keep="last")]
+    frame = frame.resample("1h").median(numeric_only=True)
+    for col in VALUE_COLUMNS:
+        if col not in frame:
+            frame[col] = np.nan
+    return frame[VALUE_COLUMNS]
 
-def align_and_predict(model, input_df):
-    booster = model.get_booster()
-    feature_names = booster.feature_names
-    if feature_names:
-        for col in feature_names:
-            if col not in input_df.columns:
-                input_df[col] = 0.0
-        input_df = input_df[feature_names]
-    return model.predict(input_df)
+def find_file_case_insensitive(folder: Path, expected_name: str):
+    if not folder.exists():
+        return None
+    target = expected_name.lower()
+    for path in folder.iterdir():
+        if path.is_file() and path.name.lower() == target:
+            return path
+    return None
 
-def align_and_predict_proba(model, input_df):
-    booster = model.get_booster()
-    feature_names = booster.feature_names
-    if feature_names:
-        for col in feature_names:
-            if col not in input_df.columns:
-                input_df[col] = 0.0
-        input_df = input_df[feature_names]
-    return model.predict_proba(input_df)
 
-def generate_forecast_features_from_history(history_df, hours=24, site_cat_id=0):
-    last_row = history_df.iloc[-1]
-    base_temp = last_row["temp_C"]
-    base_do = last_row["DO_mgL"]
-    base_pH = last_row["pH"]
-    base_sal = last_row["salinity_PSU"]
-    
-    dDO_1h = history_df["DO_mgL"].diff(4).iloc[-1] if len(history_df) >= 4 else 0.0
-    dDO_3h = history_df["DO_mgL"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
-    dDO_6h = history_df["DO_mgL"].diff(24).iloc[-1] if len(history_df) >= 24 else 0.0
-    dDO_12h = history_df["DO_mgL"].diff(48).iloc[-1] if len(history_df) >= 48 else 0.0
-    dDO_24h = history_df["DO_mgL"].diff(96).iloc[-1] if len(history_df) >= 96 else 0.0
-    
-    dpH_3h = history_df["pH"].diff(12).iloc[-1] if len(history_df) >= 12 else 0.0
-    dpH_6h = history_df["pH"].diff(24).iloc[-1] if len(history_df) >= 24 else 0.0
-    
-    dDO_accel = dDO_3h - (dDO_6h / 2.0)
-    
-    do_std_12h = history_df["DO_mgL"].rolling(48, min_periods=1).std().iloc[-1]
-    do_std_24h = history_df["DO_mgL"].rolling(96, min_periods=1).std().iloc[-1]
-    ph_std_24h = history_df["pH"].rolling(96, min_periods=1).std().iloc[-1]
-    
-    future_rows = []
-    current_time = datetime.datetime.now()
-    
-    for i in range(hours):
-        step_time = current_time + datetime.timedelta(hours=i)
-        hour_of_day = step_time.hour
-        day_of_year = step_time.timetuple().tm_yday
-        
-        temp_est = base_temp + 1.2 * np.sin(2 * np.pi * (hour_of_day - 6) / 24.0)
-        
-        do_solubility = 14.652 - (0.41022 * temp_est) + (0.007991 * (temp_est**2)) - (0.000077774 * (temp_est**3))
-        do_deficit = max(0.0, do_solubility - base_do)
-        do_sat_ratio = base_do / (do_solubility + 1e-5)
-        do_pH_ratio = base_do / (base_pH + 1e-5)
-        do_temp_ratio = base_do / (temp_est + 1e-5)
-        
-        row = {
-            'temp_C': temp_est,
-            'DO_mgL': base_do,
-            'pH': base_pH,
-            'salinity_PSU': base_sal,
-            'dDO_dt_1h': 0.0 if pd.isna(dDO_1h) else dDO_1h,
-            'dDO_dt_3h': 0.0 if pd.isna(dDO_3h) else dDO_3h,
-            'dDO_dt_6h': 0.0 if pd.isna(dDO_6h) else dDO_6h,
-            'dDO_dt_12h': 0.0 if pd.isna(dDO_12h) else dDO_12h,
-            'dDO_dt_24h': 0.0 if pd.isna(dDO_24h) else dDO_24h,
-            'dpH_dt_3h': 0.0 if pd.isna(dpH_3h) else dpH_3h,
-            'dpH_dt_6h': 0.0 if pd.isna(dpH_6h) else dpH_6h,
-            'dDO_acceleration': 0.0 if pd.isna(dDO_accel) else dDO_accel,
-            'DO_pH_ratio': do_pH_ratio,
-            'DO_temp_ratio': do_temp_ratio,
-            'DO_solubility_sat': do_solubility,
-            'DO_saturation_ratio': do_sat_ratio,
-            'DO_deficit': do_deficit,
-            'DO_std_12h': 0.2 if pd.isna(do_std_12h) else do_std_12h,
-            'DO_std_24h': 0.3 if pd.isna(do_std_24h) else do_std_24h,
-            'pH_std_24h': 0.1 if pd.isna(ph_std_24h) else ph_std_24h,
-            'sin_hour': np.sin(2 * np.pi * hour_of_day / 24.0),
-            'cos_hour': np.cos(2 * np.pi * hour_of_day / 24.0),
-            'sin_day': np.sin(2 * np.pi * day_of_year / 365.25),
-            'cos_day': np.cos(2 * np.pi * day_of_year / 365.25),
-            'site_code_cat': site_cat_id
-        }
-        
-        future_rows.append(row)
-        
-    return pd.DataFrame(future_rows)
+def normalize_hierarchy_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    aliases = {
+        "site_code": "station", "station": "station", "station_id": "station",
+        "horizon": "horizon", "forecast_hour": "horizon", "forecast_horizon": "horizon",
+        "selected_method": "method", "method": "method",
+        "xgboost_mae": "xgb_mae", "xgb_mae": "xgb_mae",
+        "persistence_mae": "persistence_mae",
+        "validation_rows": "validation_rows",
+    }
+    rename = {}
+    for col in frame.columns:
+        key = re.sub(r"[^a-z0-9_]", "", str(col).strip().lower())
+        if key in aliases:
+            rename[col] = aliases[key]
+    frame = frame.rename(columns=rename)
+    required = {"station", "horizon", "method"}
+    if not required.issubset(frame.columns):
+        raise ValueError(f"Hierarchy CSV is missing required columns: {sorted(required - set(frame.columns))}")
+    frame["station"] = frame["station"].astype(str).str.strip()
+    frame["horizon"] = pd.to_numeric(frame["horizon"], errors="coerce")
+    frame["method"] = frame["method"].astype(str).str.strip().str.lower()
+    frame.loc[frame["method"].str.contains("xg", na=False), "method"] = "xgboost"
+    frame.loc[frame["method"].str.contains("persist", na=False), "method"] = "persistence"
+    return frame.dropna(subset=["horizon"])
 
-try:
-    models = load_all_models()
-except Exception as e:
-    st.stop()
+
+@st.cache_resource(show_spinner=False)
+def load_models_and_hierarchies():
+    models = {}
+    hierarchies = {}
+    problems = []
+    for key, meta in VARIABLES.items():
+        folder = MODEL_ROOT / meta["folder"]
+        models[key] = {}
+        for horizon in range(1, 25):
+            filename = f'{meta["prefix"]}_{horizon}h.json'
+            path = find_file_case_insensitive(folder, filename)
+            if path is None:
+                problems.append(f"Missing model: {folder.relative_to(ROOT)}/{filename}")
+                continue
+            model = xgb.XGBRegressor()
+            model.load_model(str(path))
+            models[key][horizon] = model
+
+        hierarchy_path = find_file_case_insensitive(folder, HIERARCHY_FILES[key])
+        if hierarchy_path is None:
+            problems.append(f"Missing hierarchy CSV: {folder.relative_to(ROOT)}/{HIERARCHY_FILES[key]}")
+            hierarchies[key] = pd.DataFrame()
+        else:
+            hierarchies[key] = normalize_hierarchy_columns(pd.read_csv(hierarchy_path))
+    return models, hierarchies, problems
+
+
+def make_feature_row(history: pd.DataFrame, timestamp: pd.Timestamp) -> pd.DataFrame:
+    """Build the exact 20-column feature order used in the training notebook."""
+    row = {}
+    current = history.loc[timestamp]
+    for col in VALUE_COLUMNS:
+        row[col] = float(current[col])
+    for col in VALUE_COLUMNS:
+        for lag in LAGS:
+            lag_time = timestamp - pd.Timedelta(hours=lag)
+            value = history.at[lag_time, col] if lag_time in history.index else np.nan
+            row[f"{col}_lag{lag}h"] = float(value) if pd.notna(value) else np.nan
+    row["hour"] = int(timestamp.hour)
+    row["month"] = int(timestamp.month)
+    return pd.DataFrame([[row[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
+
+
+def get_station_method(hierarchy: pd.DataFrame, station: str, horizon: int):
+    if hierarchy.empty:
+        return None
+    match = hierarchy[
+        (hierarchy["station"].astype(str) == str(station))
+        & (hierarchy["horizon"] == horizon)
+    ]
+    if match.empty:
+        return None
+    method = str(match.iloc[0]["method"]).lower()
+    return method if method in {"xgboost", "persistence"} else None
+
+
+def forecast_all(
+    history: pd.DataFrame,
+    station: str,
+    models: dict,
+    hierarchies: dict,
+):
+    complete_times = []
+    for timestamp in history.index:
+        try:
+            features = make_feature_row(history, timestamp)
+            if features[FEATURE_COLUMNS].notna().all(axis=None):
+                complete_times.append(timestamp)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not complete_times:
+        raise ValueError(
+            "There is no timestamp with all four current measurements and the required "
+            "1-, 3-, 6-, and 12-hour lag values. The app will not invent missing inputs."
+        )
+    origin = complete_times[-1]
+    feature_row = make_feature_row(history, origin)
+    forecasts = []
+    for key, meta in VARIABLES.items():
+        for horizon in range(1, 25):
+            method = get_station_method(hierarchies.get(key, pd.DataFrame()), station, horizon)
+            if method is None:
+                method = "persistence"
+                method_source = "Fallback: no station+horizon hierarchy row"
+            else:
+                method_source = "Station-specific validation hierarchy"
+            if method == "xgboost":
+                model = models.get(key, {}).get(horizon)
+                if model is None:
+                    raise ValueError(f"Missing {meta['prefix']}_{horizon}h model.")
+                booster_names = model.get_booster().feature_names
+                if booster_names and list(booster_names) != FEATURE_COLUMNS:
+                    raise ValueError(
+                        f"{meta['prefix']}_{horizon}h feature schema does not match the "
+                        "training feature order. Forecast stopped rather than guessing."
+                    )
+                value = float(model.predict(feature_row)[0])
+            else:
+                value = float(feature_row.iloc[0][meta["column"]])
+            forecasts.append({
+                "variable": meta["key"], "label": meta["column"],
+                "horizon": horizon, "timestamp": origin + pd.Timedelta(hours=horizon),
+                "prediction": value, "method": method, "method_source": method_source,
+            })
+    return pd.DataFrame(forecasts), origin
+
 
 st.title("Long Island Estuary Water Quality Portal")
-st.markdown("##### Advanced XGBoost Forecasting & Hypoxia Early Warning System")
+st.caption("Station observations, transparent data provenance, and 24-hour parameter forecasts")
 
-station_metadata = {
-    "Station 01304500 (Pelham Bay - Western LI Sound Estuary)": {"id": "01304500", "type": "Estuary"},
-    "Station 01304200 (Execution Rocks - Open Sound Estuary)": {"id": "01304200", "type": "Estuary"},
-    "Station 01193050 (Connecticut River Estuary Transition)": {"id": "01193050", "type": "Tidal River"},
-    "Station 01311143 (Jamaica Bay Estuary Node)": {"id": "01311143", "type": "Estuary"},
-    "Station 01302020 (Hudson River at Piermont Pier)": {"id": "01302020", "type": "Tidal River"},
-    "Station 01305500 (Housatonic River at Stratford)": {"id": "01305500", "type": "Riverine"},
-    "Station 01304650 (Throgs Neck - East River Node)": {"id": "01304650", "type": "Estuary"},
-    "Station 01302250 (Upper New York Harbor - Battery Terminal)": {"id": "01302250", "type": "Harbor"}
-}
+with st.sidebar:
+    st.header("Station setup")
+    station_id = st.text_input("USGS station ID", value="01491000", help="Enter an 8- or 15-character USGS monitoring-location ID.")
+    days = st.selectbox("Historical context", [30, 60, 90], index=2)
+    st.markdown("---")
+    st.subheader("Optional compatible NOAA station")
+    noaa_station = st.text_input(
+        "NOAA CO-OPS station ID",
+        value="",
+        help="Optional. Used only as a fallback for water temperature/salinity when USGS does not provide that variable. Confirm it represents the same water body/location.",
+    )
+    st.markdown("---")
+    st.subheader("Optional sensor data")
+    sensor_upload = st.file_uploader("Upload sensor CSV", type=["csv"])
+    st.caption("CSV needs timestamps and recognized columns such as DO_mgL, temp_C, pH, salinity_PSU.")
+    refresh = st.button("Refresh observations", use_container_width=True)
 
-valid_stations = {}
-for name, meta in station_metadata.items():
+if refresh:
+    st.cache_data.clear()
+
+if not re.fullmatch(r"\d{8}(\d{7})?", station_id.strip()):
+    st.error("Enter a valid-looking USGS station ID (8 or 15 digits).")
+    st.stop()
+
+models, hierarchies, model_problems = load_models_and_hierarchies()
+if model_problems:
+    st.error("The model suite is incomplete. Fix these repository paths before forecasting:")
+    for problem in model_problems:
+        st.write(f"- {problem}")
+    st.stop()
+
+with st.spinner(f"Retrieving up to {days} days of observations..."):
     try:
-        fetch_usgs_station_history(meta["id"], days=1)
-        valid_stations[name] = meta
-    except Exception:
-        pass
+        raw_history = fetch_usgs_history(station_id.strip(), days)
+        source_notes = {col: "USGS NWIS" for col in raw_history.columns}
+        raw_history, source_notes = merge_optional_noaa(raw_history, noaa_station, days)
+        if sensor_upload is not None:
+            sensor_data = load_uploaded_sensor_csv(sensor_upload)
+            raw_history = raw_history.combine_first(sensor_data)
+            for col in sensor_data.columns:
+                if sensor_data[col].notna().any():
+                    source_notes[col] = "User-uploaded sensor CSV fills missing timestamps"
+        hourly = build_hourly_history(raw_history)
+    except Exception as exc:
+        st.error(f"Could not retrieve/prepare station observations: {exc}")
+        st.info("Check the station ID, network connection, and whether the station reports the required parameters.")
+        st.stop()
 
-if not valid_stations:
-    st.error("No active stations found reporting required parameters.")
-    st.stop()
+latest_by_variable = {}
+for col in VALUE_COLUMNS:
+    valid = hourly[col].dropna()
+    latest_by_variable[col] = valid.index.max() if not valid.empty else pd.NaT
 
-selected_station_name = st.sidebar.selectbox("Select Validated Station", list(valid_stations.keys()))
-selected_meta = valid_stations[selected_station_name]
-selected_station_id = selected_meta["id"]
+st.subheader(f"Station {station_id.strip()} — observation status")
+metric_cols = st.columns(4)
+for i, (label, meta) in enumerate(VARIABLES.items()):
+    col = meta["column"]
+    valid = hourly[col].dropna()
+    with metric_cols[i]:
+        if valid.empty:
+            st.metric(label, "Unavailable")
+            st.caption("No compatible source returned this variable")
+        else:
+            latest_time = valid.index.max()
+            age_hours = (pd.Timestamp.now(tz="UTC") - latest_time).total_seconds() / 3600
+            st.metric(label, f"{valid.iloc[-1]:.2f} {meta['unit']}")
+            st.caption(f"{source_notes.get(col, 'USGS NWIS')} · {age_hours:.1f}h old")
 
+coverage = pd.DataFrame({
+    "Parameter": [v["column"] for v in VARIABLES.values()],
+    "Available hourly records": [int(hourly[v["column"]].notna().sum()) for v in VARIABLES.values()],
+    "Coverage": [f"{hourly[v['column']].notna().mean() * 100:.1f}%" for v in VARIABLES.values()],
+    "Latest observation (UTC)": [
+        latest_by_variable[v["column"]].strftime("%Y-%m-%d %H:%M") if pd.notna(latest_by_variable[v["column"]]) else "Unavailable"
+        for v in VARIABLES.values()
+    ],
+    "Source": [source_notes.get(v["column"], "Unavailable") for v in VARIABLES.values()],
+})
+with st.expander("Data coverage and provenance", expanded=False):
+    st.dataframe(coverage, use_container_width=True, hide_index=True)
+    st.write(
+        "USGS measurements are the primary source. NOAA CO-OPS is queried only when you provide a station ID "
+        "and USGS has no observations for temperature or salinity. NOAA is not used for dissolved oxygen or pH. "
+        "No conductivity-to-salinity conversion, zero-filling, or long-gap interpolation is performed."
+    )
+
+st.subheader("Historical station record")
+history_chart = go.Figure()
+for col, label in [
+    ("DO_mgL", "Dissolved oxygen (mg/L)"),
+    ("temp_C", "Temperature (°C)"),
+    ("pH", "pH"),
+    ("salinity_PSU", "Salinity (PSU)"),
+]:
+    history_chart.add_trace(go.Scatter(
+        x=hourly.index, y=hourly[col], mode="lines", name=label,
+        connectgaps=False,
+    ))
+history_chart.update_layout(
+    height=420, hovermode="x unified",
+    xaxis_title="Time (UTC)", yaxis_title="Observed value",
+    legend_title="Parameter",
+)
+st.plotly_chart(history_chart, use_container_width=True)
+st.caption("Separate parameter units share the plot; use the data table for exact values. Gaps are intentionally left visible.")
+
+with st.expander("Hourly observations table"):
+    st.dataframe(hourly.tail(24 * 14), use_container_width=True)
+
+st.subheader("Recent trends")
+trend_cols = st.columns(4)
+for i, (label, meta) in enumerate(VARIABLES.items()):
+    series = hourly[meta["column"]].dropna()
+    with trend_cols[i]:
+        if len(series) >= 2:
+            first, last = series.iloc[0], series.iloc[-1]
+            st.metric(label, f"{last:.2f} {meta['unit']}", delta=f"{last - first:+.2f} over available record")
+        else:
+            st.metric(label, "Insufficient data")
+st.caption("These are descriptive changes across the available historical record, not a causal analysis or proof of station-specific model adaptation.")
+
+st.subheader("24-hour forecast")
 try:
-    station_history_df = fetch_usgs_station_history(selected_station_id, days=3)
-except Exception as e:
-    st.error(f"Failed to fetch USGS historical data: {e}")
+    forecast, forecast_origin = forecast_all(hourly, station_id.strip(), models, hierarchies)
+except Exception as exc:
+    st.warning(f"Forecast is not available yet: {exc}")
+    st.info(
+        "The model requires all four present measurements and exact 1-, 3-, 6-, and 12-hour lag values. "
+        "Missing inputs are not replaced with zeros or synthetic estimates."
+    )
     st.stop()
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Farmer Settings")
-crash_threshold = st.sidebar.slider("Crash Threshold Probability (%)", 10.0, 90.0, 30.0, 5.0)
+st.caption(f"Forecast issued from the latest complete feature timestamp: {forecast_origin.strftime('%Y-%m-%d %H:%M UTC')}")
+forecast_tabs = st.tabs(["Dissolved oxygen", "Temperature", "pH", "Salinity", "Forecast methods"])
+for tab, (label, meta) in zip(forecast_tabs[:4], VARIABLES.items()):
+    with tab:
+        subset = forecast[forecast["variable"] == meta["key"]].sort_values("horizon")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=subset["timestamp"], y=subset["prediction"],
+            mode="lines+markers", name=f"{label} forecast",
+            connectgaps=False,
+        ))
+        if meta["key"] == "do":
+            fig.add_hline(y=3.0, line_dash="dash", line_color="#dc2626",
+                          annotation_text="3 mg/L reference threshold")
+            fig.add_hline(y=5.0, line_dash="dot", line_color="#d97706",
+                          annotation_text="5 mg/L reference")
+        fig.update_layout(
+            height=390, xaxis_title="Forecast time (UTC)",
+            yaxis_title=meta["unit"], hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        selected = st.select_slider(
+            f"Inspect {label} forecast hour",
+            options=list(range(1, 25)), value=1, key=f"hour_{meta['key']}",
+        )
+        row = subset.loc[subset["horizon"] == selected].iloc[0]
+        st.metric(f"{label} at +{selected}h", f"{row['prediction']:.3f} {meta['unit']}")
+        st.caption(f"Method: {row['method']} · {row['method_source']}")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Admin Testing Portal")
-admin_pass = st.sidebar.text_input("Enter Admin Passcode", type="password")
+with forecast_tabs[4]:
+    method_table = forecast.pivot(index="horizon", columns="variable", values="method").reset_index()
+    method_table = method_table.rename(columns={
+        "horizon": "Forecast hour", "do": "DO", "temp": "Temperature",
+        "ph": "pH", "salinity": "Salinity",
+    })
+    st.dataframe(method_table, use_container_width=True, hide_index=True)
+    st.write(
+        "For each variable and horizon, the app uses the station-specific validation hierarchy when a matching "
+        "station+horizon row exists. If there is no row, it explicitly falls back to persistence (the latest "
+        "observed value); that fallback is not presented as a hierarchy decision."
+    )
 
-show_raw_prob = False
+st.subheader("Model intelligence")
+int_cols = st.columns(3)
+with int_cols[0]:
+    st.metric("Forecast horizons", "24")
+    st.caption("One independent model per variable and horizon")
+with int_cols[1]:
+    st.metric("Model suite", "96 regressors")
+    st.caption("4 water-quality variables × 24 horizons")
+with int_cols[2]:
+    st.metric("Station context", f"{days} days")
+    st.caption("Used for lags, coverage, and trend analysis")
 
-if admin_pass == "admin123":
-    st.sidebar.success("Admin Mode Active")
-    sim_mode = st.sidebar.checkbox("Enable Simulation Mode", value=False)
-    show_raw_prob = st.sidebar.checkbox("Show Raw Floating-Point Probability", value=True)
-    if sim_mode:
-        sim_do = st.sidebar.slider("Simulate Crash Past DO (mg/L)", 1.0, 12.0, 2.5)
-        sim_temp = st.sidebar.slider("Simulate Crash Past Temp (°C)", 5.0, 35.0, 29.0)
-        sim_ph = st.sidebar.slider("Simulate Crash Past pH", 5.0, 10.0, 7.1)
-        sim_sal = st.sidebar.slider("Simulate Crash Past Salinity", 0.0, 40.0, 12.0)
-        
-        station_history_df["DO_mgL"] = sim_do
-        station_history_df["temp_C"] = sim_temp
-        station_history_df["pH"] = sim_ph
-        station_history_df["salinity_PSU"] = sim_sal
-
-forecast_df = generate_forecast_features_from_history(station_history_df, hours=24)
-
-pred_temps = pd.Series(align_and_predict(models["temp"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
-pred_dos = pd.Series(align_and_predict(models["do"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
-pred_phs = pd.Series(align_and_predict(models["pH"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
-pred_salts = pd.Series(align_and_predict(models["salinity"], forecast_df.copy())).rolling(window=3, min_periods=1, center=True).mean().values
-
-forecast_df_hypoxia = forecast_df.copy()
-forecast_df_hypoxia["temp_C"] = pred_temps
-forecast_df_hypoxia["DO_mgL"] = pred_dos
-forecast_df_hypoxia["pH"] = pred_phs
-forecast_df_hypoxia["salinity_PSU"] = pred_salts
-forecast_df_hypoxia["DO_solubility_sat"] = 14.652 - (0.41022 * pred_temps) + (0.007991 * (pred_temps**2)) - (0.000077774 * (pred_temps**3))
-forecast_df_hypoxia["DO_deficit"] = np.maximum(0.0, forecast_df_hypoxia["DO_solubility_sat"] - pred_dos)
-forecast_df_hypoxia["DO_saturation_ratio"] = pred_dos / (forecast_df_hypoxia["DO_solubility_sat"] + 1e-5)
-forecast_df_hypoxia["DO_pH_ratio"] = pred_dos / (pred_phs + 1e-5)
-forecast_df_hypoxia["DO_temp_ratio"] = pred_dos / (pred_temps + 1e-5)
-
-if hasattr(models["hypoxia"], "predict_proba"):
-    raw_hypoxia_probs = align_and_predict_proba(models["hypoxia"], forecast_df_hypoxia)[:, 1]
-else:
-    raw_hypoxia_probs = align_and_predict(models["hypoxia"], forecast_df_hypoxia)
-
-raw_hypoxia_probs = pd.Series(raw_hypoxia_probs).rolling(window=3, min_periods=1, center=True).mean().values
-hypoxia_percentages = raw_hypoxia_probs * 100.0
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Forecast Time Control")
-selected_hour = st.sidebar.slider("Advance Forecast Horizon (Hours)", min_value=0, max_value=23, value=0, step=1)
-
-wqi_score = compute_wqi(pred_dos[selected_hour], pred_temps[selected_hour], pred_phs[selected_hour], pred_salts[selected_hour])
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Selected Hour Telemetry (+{}h)".format(selected_hour))
-st.sidebar.metric(label="Forecasted DO", value=f"{pred_dos[selected_hour]:.2f} mg/L")
-st.sidebar.metric(label="Forecasted Temperature", value=f"{pred_temps[selected_hour]:.2f} °C")
-st.sidebar.metric(label="Forecasted pH", value=f"{pred_phs[selected_hour]:.2f}")
-st.sidebar.metric(label="Forecasted Salinity", value=f"{pred_salts[selected_hour]:.2f} PSU")
-st.sidebar.metric(label="Water Quality Index (WQI)", value=f"{wqi_score:.0f} / 100")
-st.sidebar.metric(label="Hypoxia Crash Probability", value=f"{hypoxia_percentages[selected_hour]:.1f}%")
-
-if show_raw_prob:
-    st.sidebar.metric(label="Raw Model Probability", value=f"{raw_hypoxia_probs[selected_hour]:.6f}")
-
-wqi_col1, wqi_col2 = st.columns([1, 3])
-with wqi_col1:
-    st.metric(label="Public Water Quality Index (WQI)", value=f"{wqi_score:.0f} / 100", delta=selected_meta["type"])
-with wqi_col2:
-    if wqi_score >= 80:
-        st.success("WQI Status: Excellent — Optimal conditions for estuarine life & shellfisheries.")
-    elif wqi_score >= 50:
-        st.warning("WQI Status: Fair — Moderate stress detected; monitor parameters closely.")
-    elif wqi_score >= 30:
-        st.warning("WQI Status: Stressed — Water quality parameters degrading.")
-    else:
-        st.error("WQI Status: Critical — High threat of environmental hypoxia crash.")
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dissolved Oxygen", "Temperature", "pH", "Salinity", "Hypoxia Probability"])
-
-forecast_hours = [f"+{i}h" for i in range(24)]
-
-with tab1:
-    fig = px.line(x=forecast_hours, y=pred_dos, labels={"x": "Forecast Horizon", "y": "Dissolved Oxygen (mg/L)"}, title="Dissolved Oxygen 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_dos[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab2:
-    fig = px.line(x=forecast_hours, y=pred_temps, labels={"x": "Forecast Horizon", "y": "Temperature (°C)"}, title="Water Temperature 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_temps[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab3:
-    fig = px.line(x=forecast_hours, y=pred_phs, labels={"x": "Forecast Horizon", "y": "pH"}, title="pH 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_phs[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab4:
-    fig = px.line(x=forecast_hours, y=pred_salts, labels={"x": "Forecast Horizon", "y": "Salinity (PSU)"}, title="Salinity 24-Hour Trajectory")
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[pred_salts[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.update_layout(yaxis=dict(autorange=True), xaxis=dict(autorange=True), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab5:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=forecast_hours, y=hypoxia_percentages, mode='lines+markers', name='Crash Probability (%)', line=dict(color='#3b82f6', width=3)))
-    fig.add_scatter(x=[forecast_hours[selected_hour]], y=[hypoxia_percentages[selected_hour]], mode='markers', marker=dict(size=14, color='#ef4444'), name='Selected Hour')
-    fig.add_hline(y=crash_threshold, line_dash="dash", line_color="#ef4444", annotation_text=f"Crash Threshold ({crash_threshold:.0f}%)", annotation_position="top right")
-    fig.update_layout(xaxis_title="Forecast Horizon", yaxis_title="Probability (%)", yaxis=dict(range=[0, 105], autorange=False), title="Hypoxia Crash Probability Percentage", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("---")
-st.markdown("### Estuary Parameter Threshold Reference")
-
-col_a, col_b, col_c, col_d = st.columns(4)
-
-with col_a:
+with st.expander("How the data and prediction hierarchy works", expanded=False):
     st.markdown("""
-    <div style="background-color: #f0fdf4; padding: 20px; border-radius: 10px; border-left: 6px solid #22c55e; border-top: 1px solid #bbf7d0; border-right: 1px solid #bbf7d0; border-bottom: 1px solid #bbf7d0;">
-        <h4 style="color: #166534; margin-top: 0; font-weight: 600;">Dissolved Oxygen</h4>
-        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> >= 5.0 mg/L</p>
-        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 3.0 mg/L</p>
-    </div>
-    """, unsafe_allow_html=True)
+    **Observation-source order**
+    1. **USGS NWIS** is queried first for water temperature, dissolved oxygen, pH, and direct salinity.
+    2. **NOAA CO-OPS** can supplement water temperature and salinity only when you explicitly supply a NOAA station ID and USGS has no observations for that variable. Confirm the NOAA station is physically representative of the USGS site before using it.
+    3. **User sensor CSV** can fill timestamps not present in the API record. Its values are labeled as user-uploaded data.
+    4. If a parameter is still missing, it stays missing. The app does not silently borrow a distant station or invent values.
 
-with col_b:
-    st.markdown("""
-    <div style="background-color: #fefce8; padding: 20px; border-radius: 10px; border-left: 6px solid #eab308; border-top: 1px solid #fef08a; border-right: 1px solid #fef08a; border-bottom: 1px solid #fef08a;">
-        <h4 style="color: #854d0e; margin-top: 0; font-weight: 600;">Water Temperature</h4>
-        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 15.0 - 25.0 °C</p>
-        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> > 28.0 °C</p>
-    </div>
-    """, unsafe_allow_html=True)
+    **Prediction-method order**
+    - For each target variable and forecast hour, look up the station and horizon in that variable's validation hierarchy CSV.
+    - If the hierarchy selected XGBoost, use that exact horizon-specific JSON model.
+    - If it selected persistence, carry forward the latest observed value.
+    - If no station+horizon row exists, use a clearly labeled persistence fallback.
 
-with col_c:
-    st.markdown("""
-    <div style="background-color: #ecfeff; padding: 20px; border-radius: 10px; border-left: 6px solid #06b6d4; border-top: 1px solid #a5f3fc; border-right: 1px solid #a5f3fc; border-bottom: 1px solid #a5f3fc;">
-        <h4 style="color: #155e75; margin-top: 0; font-weight: 600;">pH Levels</h4>
-        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 7.5 - 8.5</p>
-        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 7.3</p>
-    </div>
-    """, unsafe_allow_html=True)
+    **Three-month station context**
+    - The selected 30/60/90-day record supplies current values, lag features, coverage, and descriptive trends.
+    - This version does **not** automatically retrain or fine-tune the 96 base models. Three months of data alone is not enough to justify adaptation: a safe adaptation workflow needs correctly aligned future labels for each horizon, chronological holdout validation, and proof that the adapted model beats both the base model and persistence.
+    """)
 
-with col_d:
-    st.markdown("""
-    <div style="background-color: #fef2f2; padding: 20px; border-radius: 10px; border-left: 6px solid #ef4444; border-top: 1px solid #fecaca; border-right: 1px solid #fecaca; border-bottom: 1px solid #fecaca;">
-        <h4 style="color: #991b1b; margin-top: 0; font-weight: 600;">Salinity</h4>
-        <p style="color: #15803d; margin-bottom: 6px;"><b>Safe Range:</b> 15 - 30 PSU</p>
-        <p style="color: #991b1b; margin-bottom: 0;"><b>Harmful:</b> < 10 PSU</p>
-    </div>
-    """, unsafe_allow_html=True)
+with st.expander("Important scientific limitations", expanded=True):
+    st.warning(
+        "This is a research prototype, not a validated operational warning service. "
+        "The former hypoxia classifier and arbitrary WQI score have been removed. "
+        "A dissolved-oxygen forecast below 3 mg/L is a threshold-based flag for review, "
+        "not a calibrated probability of a hypoxia event."
+    )
+    st.markdown(
+        "- USGS and NOAA stations may differ in location, depth, sensor, sampling interval, and QA status.\n"
+        "- NOAA data are not automatically matched to a USGS station; the operator must confirm the station pairing.\n"
+        "- The app does not yet perform spatial interpolation or automatic NERRS retrieval. NERRS CDMO access requires authorization.\n"
+        "- Forecast quality depends on the model's training domain and the completeness/freshness of the station record."
+    )
+
+st.divider()
+st.caption(
+    "Data services: USGS Water Data / NWIS and, when explicitly configured, NOAA CO-OPS. "
+    "All timestamps shown in this app are UTC unless otherwise labeled."
+)
