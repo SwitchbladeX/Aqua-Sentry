@@ -249,7 +249,10 @@ fig.update_xaxes(range=[start,end],title_text="Time (UTC)",row=4,col=1,gridcolor
 fig.update_layout(height=1080,hovermode="x unified",plot_bgcolor="white",paper_bgcolor="rgba(255,255,255,0)",font={"family":"DM Sans, sans-serif","color":"#29495b"},legend={"orientation":"h","y":1.045,"x":.7},margin={"t":80,"b":45,"l":125,"r":22})
 st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False})
 if forecast["method_source"].str.contains("scale guard").any():
-    st.warning("Salinity model outputs are on a scale inconsistent with recent PSU observations. Persistence is shown for affected forecast hours instead of an unreliable model value. Retrain the salinity models with PSU targets to restore the model outlook.")
+    st.markdown(
+        '<p style="color:#d32f2f; font-weight:700;">Salinity model not working</p>',
+        unsafe_allow_html=True,
+    )
 with st.expander("Data sources and forecast details"):
     source_rows=[]
     for label,meta in VARIABLES.items():
