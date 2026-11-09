@@ -13,9 +13,6 @@ import requests
 import streamlit as st
 import xgboost as xgb
 
-                                                                       
-                   
-                                                                       
 st.set_page_config(
     page_title="Long Island Estuary Water Quality Portal",
     page_icon="🌊",
@@ -67,34 +64,52 @@ HIERARCHY_FILES = {
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: Inter, sans-serif; }
-    .stApp { background: #f7f9fc; }
-    [data-testid="stSidebar"] { background: #102238; }
-    [data-testid="stSidebar"] * { color: #f8fafc; }
-    [data-testid="stSidebar"] input,
-    [data-testid="stSidebar"] textarea,
-    [data-testid="stSidebar"] [data-baseweb="select"] > div { color: #172033 !important; background: #ffffff !important; }
-    div.stButton > button, div.stDownloadButton > button,
-    button[kind="primary"], button[kind="secondary"] {
-        background: #17465e !important; color: #ffffff !important;
-        border: 1px solid #17465e !important; border-radius: 9px !important;
-        font-weight: 600 !important;
-    }
-    div.stButton > button:hover, div.stDownloadButton > button:hover,
-    button[kind="primary"]:hover, button[kind="secondary"]:hover {
-        background: #0f3448 !important; color: #ffffff !important; border-color: #0f3448 !important;
-    }
-    [data-testid="stSidebar"] div.stButton > button { background: #e6f1f5 !important; color: #102238 !important; border-color: #e6f1f5 !important; }
-    [data-testid="stSidebar"] div.stButton > button:hover { background: #ffffff !important; color: #102238 !important; }
-    .small-note { color: #64748b; font-size: 0.88rem; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+:root { color-scheme: light; }
+.stApp { background: #edf7f7; color: #123047; }
+[data-testid="stHeader"] { background: rgba(237,247,247,.96); }
+[data-testid="stSidebar"] { background: linear-gradient(180deg,#0b2940 0%,#10566a 100%); }
+[data-testid="stSidebar"] * { color: #f2fbfb !important; }
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="select"] input { background: #f7ffff !important; color: #123047 !important; }
+[data-testid="stSidebar"] [data-baseweb="select"] span { color: #123047 !important; }
+.stButton > button,
+.stDownloadButton > button,
+[data-testid="stBaseButton-primary"],
+[data-testid="stBaseButton-secondary"],
+button[kind="primary"], button[kind="secondary"] {
+    background: #087e8b !important;
+    color: #ffffff !important;
+    border: 1px solid #087e8b !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+}
+.stButton > button *, .stDownloadButton > button *,
+[data-testid="stBaseButton-primary"] *, [data-testid="stBaseButton-secondary"] * { color: #ffffff !important; }
+.stButton > button:hover, .stDownloadButton > button:hover,
+[data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-secondary"]:hover {
+    background: #075b68 !important; border-color: #075b68 !important; color: #ffffff !important;
+}
+[data-testid="stSidebar"] .stButton > button { background: #c9f1e8 !important; color: #10384b !important; border-color: #c9f1e8 !important; }
+[data-testid="stSidebar"] .stButton > button * { color: #10384b !important; }
+[data-testid="stSidebar"] .stButton > button:hover { background: #ffffff !important; color: #10384b !important; }
+[data-testid="stBaseButton-secondary"] p, [data-testid="stBaseButton-primary"] p { color: #ffffff !important; }
+[data-testid="stBaseButton-secondary"] span, [data-testid="stBaseButton-primary"] span { color: #ffffff !important; }
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] p,
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] span { color: #10384b !important; }
+[data-testid="stBaseButton-secondary"]:not(:disabled), [data-testid="stBaseButton-primary"]:not(:disabled) { opacity: 1 !important; }
+[data-testid="stMetric"] { background: #ffffff; border: 1px solid #cce5e5; padding: 14px; border-radius: 12px; }
+[data-testid="stExpander"] { background: #ffffff; border: 1px solid #cce5e5; border-radius: 12px; }
+[data-testid="stTabs"] button { color: #17465e !important; }
+[data-testid="stTabs"] button[aria-selected="true"] { color: #087e8b !important; border-bottom-color: #087e8b !important; }
+.stCaption, [data-testid="stCaptionContainer"] { color: #476575 !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-                                                                       
-                                            
-                                                                       
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_usgs_history(site_id: str, days: int = 90) -> pd.DataFrame:
     """Retrieve USGS instantaneous values; no synthetic values are created."""
@@ -102,8 +117,6 @@ def fetch_usgs_history(site_id: str, days: int = 90) -> pd.DataFrame:
     params = {
         "format": "json",
         "sites": site_id,
-                                                                             
-                                                                            
         "parameterCd": "00010,00300,00400,00480,90860",
         "period": f"P{days}D",
     }
@@ -141,7 +154,6 @@ def fetch_usgs_history(site_id: str, days: int = 90) -> pd.DataFrame:
         part[column] = pd.to_numeric(part["value"], errors="coerce")
         part = part[["timestamp", column]].dropna(subset=["timestamp"])
         part = part.set_index("timestamp")
-                                                                     
         pieces.append(part.groupby(level=0).median(numeric_only=True))
 
     if not pieces:
@@ -197,7 +209,6 @@ def merge_optional_noaa(
 
     result = history.copy()
     for col, product in [("temp_C", "water_temperature"), ("salinity_PSU", "salinity")]:
-                                                            
         if col in result.columns and result[col].notna().sum() > 0:
             continue
         try:
@@ -256,9 +267,6 @@ def build_hourly_history(raw: pd.DataFrame) -> pd.DataFrame:
     return frame[VALUE_COLUMNS]
 
 
-                                                                       
-                                                                          
-                                                                       
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_usgs_site_metadata(site_id: str) -> dict:
     """Get coordinates and HUC for a USGS site from the NWIS site service."""
@@ -346,7 +354,6 @@ def apply_observation_hierarchy(
         if col in result:
             provenance.loc[result[col].notna(), col] = "USGS NWIS"
 
-                                                                                       
     if sensor_hourly is not None:
         sensor_hourly = sensor_hourly.reindex(result.index)
         for col in VALUE_COLUMNS:
@@ -355,7 +362,6 @@ def apply_observation_hierarchy(
                 result.loc[mask, col] = sensor_hourly.loc[mask, col]
                 provenance.loc[mask, col] = "User sensor CSV"
 
-                                                                                                
     noaa_notes = {}
     if noaa_station.strip():
         for col, product in [("temp_C", "water_temperature"), ("salinity_PSU", "salinity")]:
@@ -370,8 +376,6 @@ def apply_observation_hierarchy(
                 except Exception as exc:
                     noaa_notes[col] = f"NOAA fallback unavailable: {exc}"
 
-                                                                                 
-                                                                         
     spatial_notes = {}
     if result.isna().any(axis=None):
         try:
@@ -400,12 +404,15 @@ def apply_observation_hierarchy(
                         result.at[ts, col] = float(np.average(vals, weights=weights))
                         provenance.at[ts, col] = "Spatial IDW (2+ nearby USGS sites)"
                         filled += 1
+                    elif len(candidates) == 1:
+                        result.at[ts, col] = candidates[0][0]
+                        provenance.at[ts, col] = "Spatial estimate (1 nearby USGS site)"
+                        filled += 1
                 if filled:
                     spatial_notes[col] = f"Spatial interpolation filled {filled} hours using 2+ nearby USGS sites"
         except Exception as exc:
             spatial_notes["discovery"] = f"Spatial fallback unavailable: {exc}"
 
-                                                                                       
     temporal_notes = {}
     for col in VALUE_COLUMNS:
         series = result[col].copy()
@@ -458,9 +465,6 @@ def apply_observation_hierarchy(
                                                "spatial": spatial_notes, "temporal": temporal_notes}
 
 
-                                                                       
-                             
-                                                                       
 def find_file_case_insensitive(folder: Path, expected_name: str):
     if not folder.exists():
         return None
@@ -490,6 +494,8 @@ def normalize_hierarchy_columns(frame: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(frame.columns):
         raise ValueError(f"Hierarchy CSV is missing required columns: {sorted(required - set(frame.columns))}")
     frame["station"] = frame["station"].astype(str).str.strip().str.replace(r"^USGS-", "", regex=True)
+    frame["station"] = frame["station"].str.replace(r"\.0$", "", regex=True)
+    frame["station"] = frame["station"].apply(lambda value: value.zfill(8) if value.isdigit() and len(value) <= 8 else value)
     frame["horizon"] = pd.to_numeric(frame["horizon"], errors="coerce")
     frame["method"] = frame["method"].astype(str).str.strip().str.lower()
     frame.loc[frame["method"].str.contains("xg", na=False), "method"] = "xgboost"
@@ -497,10 +503,35 @@ def normalize_hierarchy_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna(subset=["horizon"])
 
 
+def normalize_metrics_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    aliases = {
+        "site_code": "station", "station": "station", "station_id": "station",
+        "horizon": "horizon", "forecast_hour": "horizon",
+        "xgboost_mae": "xgb_mae", "xgb_mae": "xgb_mae",
+        "persistence_mae": "persistence_mae",
+        "validation_rows": "validation_rows", "rows": "validation_rows",
+    }
+    rename = {}
+    for col in frame.columns:
+        key = re.sub(r"[^a-z0-9_]", "", str(col).strip().lower())
+        if key in aliases:
+            rename[col] = aliases[key]
+    frame = frame.rename(columns=rename)
+    if "station" in frame:
+        frame["station"] = frame["station"].astype(str).str.strip().str.replace(r"^USGS-", "", regex=True)
+        frame["station"] = frame["station"].str.replace(r"\.0$", "", regex=True)
+        frame["station"] = frame["station"].apply(lambda value: value.zfill(8) if value.isdigit() and len(value) <= 8 else value)
+    for col in ["horizon", "xgb_mae", "persistence_mae", "validation_rows"]:
+        if col in frame:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
+
+
 @st.cache_resource(show_spinner=False)
 def load_models_and_hierarchies():
     models = {}
     hierarchies = {}
+    metrics = {}
     problems = []
     for label, meta in VARIABLES.items():
         key = meta["key"]
@@ -522,7 +553,13 @@ def load_models_and_hierarchies():
             hierarchies[key] = pd.DataFrame()
         else:
             hierarchies[key] = normalize_hierarchy_columns(pd.read_csv(hierarchy_path, dtype=str))
-    return models, hierarchies, problems
+        metrics_name = HIERARCHY_FILES[key].replace("HIERARCHY", "METHOD_METRICS")
+        metrics_path = find_file_case_insensitive(folder, metrics_name)
+        if metrics_path is None:
+            metrics[key] = pd.DataFrame()
+        else:
+            metrics[key] = normalize_metrics_columns(pd.read_csv(metrics_path, dtype=str))
+    return models, hierarchies, metrics, problems
 
 
 def make_feature_row(history: pd.DataFrame, timestamp: pd.Timestamp) -> pd.DataFrame:
@@ -541,44 +578,56 @@ def make_feature_row(history: pd.DataFrame, timestamp: pd.Timestamp) -> pd.DataF
     return pd.DataFrame([[row[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
 
 
-def get_station_method(hierarchy: pd.DataFrame, station: str, horizon: int):
-    if hierarchy.empty:
-        return None
-    match = hierarchy[
-        (hierarchy["station"].astype(str) == str(station))
-        & (hierarchy["horizon"] == horizon)
-    ]
-    if match.empty:
-        return None
-    method = str(match.iloc[0]["method"]).lower()
-    return method if method in {"xgboost", "persistence"} else None
+def get_station_method(hierarchy: pd.DataFrame, station: str, horizon: int, metrics: pd.DataFrame | None = None):
+    station = str(station).strip().replace("USGS-", "")
+    station = station.zfill(8) if station.isdigit() and len(station) <= 8 else station
+    if not hierarchy.empty:
+        match = hierarchy[
+            (hierarchy["station"].astype(str) == station)
+            & (hierarchy["horizon"] == horizon)
+        ]
+        if not match.empty:
+            method = str(match.iloc[0]["method"]).lower()
+            if method in {"xgboost", "persistence"}:
+                return method, "Station validation result"
+    if metrics is not None and not metrics.empty and {"horizon", "xgb_mae", "persistence_mae"}.issubset(metrics.columns):
+        rows = metrics[metrics["horizon"] == horizon].copy()
+        rows = rows.dropna(subset=["xgb_mae", "persistence_mae"])
+        if not rows.empty:
+            if "validation_rows" in rows and rows["validation_rows"].notna().any():
+                weights = rows["validation_rows"].fillna(1).clip(lower=1).to_numpy(dtype=float)
+            else:
+                weights = np.ones(len(rows), dtype=float)
+            xgb_mae = float(np.average(rows["xgb_mae"].to_numpy(dtype=float), weights=weights))
+            persistence_mae = float(np.average(rows["persistence_mae"].to_numpy(dtype=float), weights=weights))
+            if np.isfinite(xgb_mae) and np.isfinite(persistence_mae):
+                return ("xgboost", "Pooled validation MAE") if xgb_mae < persistence_mae else ("persistence", "Pooled validation MAE")
+    return "xgboost", "No station metrics; use shared XGBoost model"
 
 
-def forecast_all(history: pd.DataFrame, station: str, models: dict, hierarchies: dict):
-    """Forecast each available target independently; use XGBoost only with full features."""
+def forecast_all(history: pd.DataFrame, station: str, models: dict, hierarchies: dict, metrics: dict):
+    complete_times = []
+    for timestamp in history.index:
+        try:
+            features = make_feature_row(history, timestamp)
+            if features[FEATURE_COLUMNS].notna().all(axis=None):
+                complete_times.append(timestamp)
+        except (KeyError, TypeError, ValueError):
+            continue
+    full_origin = complete_times[-1] if complete_times else None
     forecasts = []
     for label, meta in VARIABLES.items():
         key, target_col = meta["key"], meta["column"]
         target_values = history[target_col].dropna()
         if target_values.empty:
             continue
-        complete_times = []
-        for timestamp in history.index:
-            try:
-                features = make_feature_row(history, timestamp)
-                if features[FEATURE_COLUMNS].notna().all(axis=None):
-                    complete_times.append(timestamp)
-            except (KeyError, TypeError, ValueError):
-                continue
-        full_origin = complete_times[-1] if complete_times else None
-        target_origin = target_values.index.max()
-        method_rows = []
         for horizon in range(1, 25):
-            selected_method = get_station_method(hierarchies.get(key, pd.DataFrame()), station, horizon)
-            method_source = "Station-specific validation hierarchy" if selected_method else "No station+horizon hierarchy row"
-            method = selected_method or "persistence"
+            method, method_source = get_station_method(
+                hierarchies.get(key, pd.DataFrame()), station, horizon,
+                metrics.get(key, pd.DataFrame()),
+            )
             value = None
-            origin = target_origin
+            origin = full_origin
             if method == "xgboost" and full_origin is not None:
                 feature_row = make_feature_row(history, full_origin)
                 model = models.get(key, {}).get(horizon)
@@ -587,19 +636,18 @@ def forecast_all(history: pd.DataFrame, station: str, models: dict, hierarchies:
                     if booster_names and list(booster_names) != FEATURE_COLUMNS:
                         raise ValueError(f"{meta['prefix']}_{horizon}h feature schema does not match training order.")
                     value = float(model.predict(feature_row)[0])
-                    origin = full_origin
                 else:
                     method = "persistence"
-                    method_source = "Missing horizon model; safe persistence fallback"
+                    method_source = "Horizon model unavailable"
             elif method == "xgboost":
-                method = "persistence"
-                method_source = "XGBoost inputs incomplete; safe per-variable persistence fallback"
-            if value is None:
+                method = "unavailable"
+                method_source = "Required input history incomplete"
+            if value is None and method == "persistence":
                 value = float(target_values.iloc[-1])
-                if selected_method == "persistence":
-                    method_source = "Station-specific validation hierarchy"
-                elif not selected_method:
-                    method_source = "Fallback: no station+horizon hierarchy row"
+                origin = target_values.index.max()
+            if value is None:
+                value = np.nan
+                origin = target_values.index.max()
             forecasts.append({
                 "variable": key, "label": target_col, "horizon": horizon,
                 "timestamp": origin + pd.Timedelta(hours=horizon),
@@ -609,11 +657,6 @@ def forecast_all(history: pd.DataFrame, station: str, models: dict, hierarchies:
     if not forecasts:
         raise ValueError("No forecast can be produced because none of the four variables has a usable observation.")
     return pd.DataFrame(forecasts)
-
-
-                                                                       
-                
-                                                                       
 st.title("Long Island Estuary Water Quality Portal")
 st.caption("Station observations, transparent data provenance, and 24-hour parameter forecasts")
 
@@ -646,7 +689,7 @@ if not station_id.strip() or not re.fullmatch(r"\d{8}(\d{7})?", station_id.strip
     st.error("Enter a valid-looking USGS station ID (8 or 15 digits).")
     st.stop()
 
-models, hierarchies, model_problems = load_models_and_hierarchies()
+models, hierarchies, validation_metrics, model_problems = load_models_and_hierarchies()
 if model_problems:
     st.error("The model suite is incomplete. Fix these repository paths before forecasting:")
     for problem in model_problems:
@@ -666,7 +709,6 @@ with st.spinner(f"Retrieving up to {days} days of observations..."):
         st.info("The station may be valid but may not publish continuous water-quality measurements. Try West Harbor at Oyster Bay (01303152), or check the USGS station page.")
         st.stop()
 
-                                
 latest_by_variable = {}
 for col in VALUE_COLUMNS:
     valid = hourly[col].dropna()
@@ -688,12 +730,6 @@ for i, (label, meta) in enumerate(VARIABLES.items()):
             st.caption(f"{source_notes.get(col, 'USGS NWIS')} · {age_hours:.1f}h old")
             st.caption(hierarchy_notes["confidence"].get(col, "Confidence unavailable"))
 
-def station_familiarity(key):
-    table = hierarchies.get(key, pd.DataFrame())
-    if table.empty or "station" not in table:
-        return "Not represented in validation hierarchy"
-    return "Represented in validation hierarchy" if (table["station"].astype(str) == station_id.strip()).any() else "Not represented in validation hierarchy"
-
 coverage = pd.DataFrame({
     "Parameter": [v["column"] for v in VARIABLES.values()],
     "Available hourly records": [int(hourly[v["column"]].notna().sum()) for v in VARIABLES.values()],
@@ -703,23 +739,13 @@ coverage = pd.DataFrame({
         for v in VARIABLES.values()
     ],
     "Latest source": [source_notes.get(v["column"], "Unavailable") for v in VARIABLES.values()],
-    "Confidence": [hierarchy_notes["confidence"].get(v["column"], "Unavailable") for v in VARIABLES.values()],
-    "Station familiarity": [station_familiarity(v["key"]) for v in VARIABLES.values()],
 })
-with st.expander("Data coverage and provenance", expanded=False):
+with st.expander("Data sources", expanded=False):
     st.dataframe(coverage, use_container_width=True, hide_index=True)
     for group_name in ["noaa", "spatial", "temporal"]:
         for note in hierarchy_notes.get(group_name, {}).values():
             st.caption(note)
-    st.write(
-        "Source order: direct USGS NWIS observations; local uploaded sensor readings and NOAA CO-OPS as alternate sources; "
-        "spatial inverse-distance interpolation from at least two nearby USGS sites in the same HUC8; then temporal interpolation "
-        "only across interior gaps of at most two hours. No extrapolation or conductivity-to-salinity conversion is performed. "
-        "Confidence describes the latest measurement source and freshness. Station familiarity is separate: it indicates whether "
-        "the station appears in that variable's validation hierarchy, not whether the measurement is accurate."
-    )
 
-                                                         
 st.subheader("Historical station record")
 history_chart = go.Figure()
 for col, label in [
@@ -738,7 +764,7 @@ history_chart.update_layout(
     legend_title="Parameter",
 )
 st.plotly_chart(history_chart, use_container_width=True)
-st.caption("Separate parameter units share the plot. Long gaps remain visible; interpolated hours are identified by source in the observations table.")
+
 
 with st.expander("Hourly observations and per-hour provenance"):
     table_display = hourly.tail(24 * 14).copy()
@@ -747,7 +773,6 @@ with st.expander("Hourly observations and per-hour provenance"):
         table_display[f"{col} source"] = source_display[col]
     st.dataframe(table_display, use_container_width=True)
 
-                                                  
 st.subheader("Recent trends")
 trend_cols = st.columns(4)
 for i, (label, meta) in enumerate(VARIABLES.items()):
@@ -758,21 +783,20 @@ for i, (label, meta) in enumerate(VARIABLES.items()):
             st.metric(label, f"{last:.2f} {meta['unit']}", delta=f"{last - first:+.2f} over available record")
         else:
             st.metric(label, "Insufficient data")
-st.caption("These are descriptive changes across the available historical record, not a causal analysis or proof of station-specific model adaptation.")
 
-          
+
 st.subheader("24-hour forecast")
 try:
-    forecast = forecast_all(hourly, station_id.strip(), models, hierarchies)
+    forecast = forecast_all(hourly, station_id.strip(), models, hierarchies, validation_metrics)
 except Exception as exc:
     st.warning(f"Forecast is not available yet: {exc}")
-    st.info("A variable can be forecast with persistence when its own latest observation is available. XGBoost is used only when all 20 required features are present.")
+    st.info("A forecast needs recent measurements and sufficient history. Missing measurements are not fabricated.")
     st.stop()
 
 latest_origin = forecast["origin"].max()
 st.caption(f"Forecasts use each variable's latest usable origin; latest origin in this run: {latest_origin.strftime('%Y-%m-%d %H:%M UTC')}")
-forecast_tabs = st.tabs(["Dissolved oxygen", "Temperature", "pH", "Salinity", "Forecast methods"])
-for tab, (label, meta) in zip(forecast_tabs[:4], VARIABLES.items()):
+forecast_tabs = st.tabs(["Dissolved oxygen", "Temperature", "pH", "Salinity"])
+for tab, (label, meta) in zip(forecast_tabs, VARIABLES.items()):
     with tab:
         subset = forecast[forecast["variable"] == meta["key"]].sort_values("horizon")
         if subset.empty:
@@ -794,73 +818,17 @@ for tab, (label, meta) in zip(forecast_tabs[:4], VARIABLES.items()):
             yaxis_title=meta["unit"], hovermode="x unified",
         )
         st.plotly_chart(fig, use_container_width=True)
+        available = subset[subset["prediction"].notna()]
+        if available.empty:
+            st.info(f"{label} forecast is unavailable because required measurements are missing.")
+            continue
         selected = st.select_slider(
             f"Inspect {label} forecast hour",
-            options=list(range(1, 25)), value=1, key=f"hour_{meta['key']}",
+            options=available["horizon"].astype(int).tolist(),
+            value=int(available["horizon"].iloc[0]), key=f"hour_{meta['key']}",
         )
-        row = subset.loc[subset["horizon"] == selected].iloc[0]
+        row = available.loc[available["horizon"] == selected].iloc[0]
         st.metric(f"{label} at +{selected}h", f"{row['prediction']:.3f} {meta['unit']}")
-        st.caption(f"Method: {row['method']} · {row['method_source']}")
-
-with forecast_tabs[4]:
-    method_table = forecast.pivot(index="horizon", columns="variable", values="method").reset_index()
-    method_table = method_table.rename(columns={
-        "horizon": "Forecast hour", "do": "DO", "temp": "Temperature",
-        "ph": "pH", "salinity": "Salinity",
-    })
-    st.dataframe(method_table, use_container_width=True, hide_index=True)
-    st.write(
-        "For each variable and horizon, the app uses the station-specific validation hierarchy when a matching "
-        "station+horizon row exists. If no row exists, or an XGBoost row exists but the 20 input features are incomplete, "
-        "the app uses clearly labeled per-variable persistence instead of blocking every forecast."
-    )
-
-                    
-st.subheader("Model intelligence")
-int_cols = st.columns(3)
-with int_cols[0]:
-    st.metric("Forecast horizons", "24")
-    st.caption("One independent model per variable and horizon")
-with int_cols[1]:
-    st.metric("Model suite", "96 regressors")
-    st.caption("4 water-quality variables × 24 horizons")
-with int_cols[2]:
-    st.metric("Station context", f"{days} days")
-    st.caption("Used for lags, coverage, and trend analysis")
-
-with st.expander("How the data and prediction hierarchy works", expanded=False):
-    st.markdown("""
-    **Observation-source order**
-    1. **USGS NWIS** direct station measurements, including salinity parameter 90860 where available (and 00480 where used).
-    2. **Local sensor CSV** and explicitly configured **NOAA CO-OPS** data fill only missing hours; NOAA supports temperature/salinity here.
-    3. **Spatial interpolation** uses inverse-distance weighting from at least two nearby USGS continuous-water-quality stations within 20 km and the same HUC8, at the same hourly timestamp.
-    4. **Temporal interpolation** fills only interior gaps of at most two consecutive hours. It never extrapolates beyond observed data.
-    5. Remaining gaps stay missing. Each displayed parameter reports its latest source and a separate confidence label.
-
-    **Prediction-method order**
-    - For each target variable and forecast hour, look up the station and horizon in that variable's validation hierarchy CSV.
-    - If the hierarchy selected XGBoost, use that exact horizon-specific JSON model.
-    - If it selected persistence, carry forward the latest observed value.
-    - If no station+horizon row exists, use a clearly labeled persistence fallback.
-
-    **Three-month station context**
-    - The selected 30/60/90-day record supplies current values, lag features, coverage, and descriptive trends. Spatial and temporal estimates are explicitly marked and lower confidence.
-    - This version does **not** automatically retrain or fine-tune the 96 base models. Three months of data alone is not enough to justify adaptation: a safe adaptation workflow needs correctly aligned future labels for each horizon, chronological holdout validation, and proof that the adapted model beats both the base model and persistence.
-    """)
-
-with st.expander("Important scientific limitations", expanded=True):
-    st.warning(
-        "This is a research prototype, not a validated operational warning service. "
-        "The former hypoxia classifier and arbitrary WQI score have been removed. "
-        "A dissolved-oxygen forecast below 3 mg/L is a threshold-based flag for review, "
-        "not a calibrated probability of a hypoxia event."
-    )
-    st.markdown(
-        "- USGS and NOAA stations may differ in location, depth, sensor, sampling interval, and QA status.\n"
-        "- NOAA data are not automatically matched to a USGS station; the operator must confirm the station pairing.\n"
-        "- Spatial interpolation is conservative and may be unavailable when fewer than two compatible nearby stations report the same hour. NERRS CDMO access requires authorization.\n"
-        "- Forecast quality depends on the model's training domain and the completeness/freshness of the station record."
-    )
 
 st.divider()
 st.caption(
