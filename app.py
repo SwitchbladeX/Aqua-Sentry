@@ -266,8 +266,9 @@ def load_models_and_hierarchies():
     models = {}
     hierarchies = {}
     problems = []
-    for key, meta in VARIABLES.items():
-        folder = MODEL_ROOT / meta["folder"]
+    for label, meta in VARIABLES.items():
+    key = meta["key"]
+    folder = MODEL_ROOT / meta["folder"]
         models[key] = {}
         for horizon in range(1, 25):
             filename = f'{meta["prefix"]}_{horizon}h.json'
