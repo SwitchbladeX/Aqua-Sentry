@@ -527,12 +527,13 @@ def build_station_adaptation(history: pd.DataFrame, hourly_provenance: pd.DataFr
 def make_forecast(history: pd.DataFrame, station: str, assets, adaptation: dict) -> pd.DataFrame:
     models, hierarchies, metrics = assets
     feature_history = build_feature_history(history)
-    shared = history.dropna(subset=VALUE_COLUMNS, how="any")
-    if shared.empty:
-        raise ValueError("Recent observations for all four parameters are needed to create a forecast.")
-    origin = feature_history.index[-1] if not feature_history.empty else shared.index[-1]
-    forecasts = []
+    if feature_history.empty:
+        raise ValueError(
+            "Not enough complete historical observations to create a forecast."
+        )
 
+    origin = feature_history.index[-1]
+    forecasts = []
     for label, meta in VARIABLES.items():
         key, col = meta["key"], meta["column"]
         for horizon in range(1, 25):
