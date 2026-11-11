@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 import xgboost as xgb
 
-st.set_page_config(page_title="Water Management AI", page_icon="🌊", layout="wide")
+st.set_page_config(page_title="AquaSentry", page_icon="🌊", layout="wide")
 ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "models"
 VARIABLES = {
@@ -34,6 +34,14 @@ STATIONS = {
     "Forge River at Mastic, NY — 01304057": "01304057", "Hempstead Bay at Freeport, NY — 01304998": "01304998",
     "Enter a different USGS station": "custom",
 }
+STATION_METADATA = {
+    "01303152": {"name": "West Harbor at Oyster Bay, NY", "lat": 40.8784, "lon": -73.5352},
+    "01304562": {"name": "Peconic River at Riverhead, NY", "lat": 40.9234, "lon": -72.6687},
+    "01304200": {"name": "South side of Shelter Island, NY", "lat": 41.0543, "lon": -72.3382},
+    "01304190": {"name": "Orient Point Harbor, NY", "lat": 41.1440, "lon": -72.2351},
+    "01304057": {"name": "Forge River at Mastic, NY", "lat": 40.7812, "lon": -72.8590},
+    "01304998": {"name": "Hempstead Bay at Freeport, NY", "lat": 40.6354, "lon": -73.5801},
+}
 
 st.markdown("""
 <style>
@@ -53,37 +61,33 @@ st.markdown("""
 .stButton > button,.stDownloadButton > button {background:#1769aa !important;color:white !important;border:0;border-radius:10px;font-weight:700;}
 .stButton > button:hover {background:#105487 !important;}
 [data-testid="stCaptionContainer"] {color:#60778d !important;}
-.hero {padding:17px 26px;border-radius:18px;background:linear-gradient(112deg,#123b64,#1769aa 58%,#328cc4);color:white;margin:0 0 18px;box-shadow:0 10px 28px rgba(23,75,120,.18);}
-.hero h1 {font-size:2.2rem;margin:0;color:white;letter-spacing:-.04em;line-height:1.2;}
+.hero {padding:22px 28px;border-radius:18px;background:linear-gradient(112deg,#123b64,#1769aa 58%,#328cc4);color:white;margin:0 0 20px;box-shadow:0 10px 28px rgba(23,75,120,.18);}
+.hero h1 {font-size:2.2rem;margin:0 0 6px 0;color:white;letter-spacing:-.04em;line-height:1.2;}
+.hero p {font-size:1.05rem;margin:0;color:#e1effe;font-weight:400;}
 </style>
 """, unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
 def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
-    response = requests.get(
-        "https://waterservices.usgs.gov/nwis/iv/",
-        params={
-            "format": "json",
-            "sites": site,
-            "parameterCd": "00010,00300,00400,00480",
-            "period": f"P{days}D",
-        },
-        timeout=45,
-        headers={"User-Agent": "HydroSentinel/1.0"},
-    )
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            "https://waterservices.usgs.gov/nwis/iv/",
+            params={
+                "format": "json",
+                "sites": site,
+                "parameterCd": "00010,00300,00400,00480",
+                "period": f"P{days}D",
+            },
+            timeout=45,
+            headers={"User-Agent": "AquaSentry/1.0"},
+        )
+        response.raise_for_status()
+        series = response.json().get("value", {}).get("timeSeries", [])
+    except Exception as exc:
+        raise ValueError(f"USGS API request failed: {exc}")
 
-    series = response.json().get("value", {}).get("timeSeries", [])
-
-    mapping = {
-        meta["code"]: meta["column"]
-        for meta in VARIABLES.values()
-    }
-
+    mapping = {meta["code"]: meta["column"] for meta in VARIABLES.values()}
     parts = []
 
     for item in series:
@@ -94,26 +98,15 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
             continue
 
         col = mapping.get(codes[0].get("value"))
-
         if col is None:
             continue
 
         data = pd.DataFrame(groups[0].get("value", []))
-
         if not {"dateTime", "value"}.issubset(data.columns):
             continue
 
-        data["time"] = pd.to_datetime(
-            data["dateTime"],
-            utc=True,
-            errors="coerce",
-        )
-
-        data[col] = pd.to_numeric(
-            data["value"],
-            errors="coerce",
-        )
-
+        data["time"] = pd.to_datetime(data["dateTime"], utc=True, errors="coerce")
+        data[col] = pd.to_numeric(data["value"], errors="coerce")
         data = data.dropna(subset=["time", col])
 
         if data.empty:
@@ -125,13 +118,10 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
             .median()
             .sort_index()
         )
-
         parts.append(measurements)
 
     if not parts:
-        raise ValueError(
-            "USGS returned no supported water-quality observations."
-        )
+        raise ValueError("USGS returned no supported water-quality observations.")
 
     raw = (
         pd.concat(parts, axis=1)
@@ -148,60 +138,35 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
         index=raw.index,
         columns=raw.columns,
     )
-
-    provenance[raw.notna()] = "USGS Direct"
-
-    return raw, provenance
-
-
     for col in raw.columns:
         provenance.loc[raw[col].notna(), col] = "USGS Direct"
 
     return raw, provenance
 
-    response.raise_for_status()
-    series = response.json().get("value", {}).get("timeSeries", [])
-    mapping = {meta["code"]: meta["column"] for meta in VARIABLES.values()}
-    mapping["90860"] = "salinity_PSU"
-    parts = []
-    for item in series:
-        codes, groups = item.get("variable", {}).get("variableCode", []), item.get("values", [])
-        if not codes or not groups:
-            continue
-        col = mapping.get(codes[0].get("value"))
-        if col is None:
-            continue
-        data = pd.DataFrame(groups[0].get("value", []))
-        if not {"dateTime", "value"}.issubset(data.columns):
-            continue
-        data["time"] = pd.to_datetime(data["dateTime"], utc=True, errors="coerce")
-        data[col] = pd.to_numeric(data["value"], errors="coerce")
-        parts.append(data.dropna(subset=["time"]).set_index("time")[[col]].groupby(level=0).median())
-    if not parts:
-        raise ValueError("USGS returned no supported water-quality series for this station.")
-    raw = pd.concat(parts, axis=1).groupby(level=0).median(numeric_only=True).sort_index()
-    return raw.loc[:, ~raw.columns.duplicated()]
-
 
 def fetch_noaa(station: str, product: str, days: int = 90) -> pd.Series:
     end = datetime.now(timezone.utc)
-    response = requests.get(
-        "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter",
-        params={
-            "product": product,
-            "application": "WaterManagementAI",
-            "begin_date": (end - timedelta(days=days)).strftime("%Y%m%d"),
-            "end_date": end.strftime("%Y%m%d"),
-            "station": station,
-            "time_zone": "gmt",
-            "units": "metric",
-            "format": "json",
-            "interval": "h",
-        },
-        timeout=45,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = requests.get(
+            "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter",
+            params={
+                "product": product,
+                "application": "AquaSentry",
+                "begin_date": (end - timedelta(days=days)).strftime("%Y%m%d"),
+                "end_date": end.strftime("%Y%m%d"),
+                "station": station,
+                "time_zone": "gmt",
+                "units": "metric",
+                "format": "json",
+                "interval": "h",
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise ValueError(f"NOAA API request failed: {exc}")
+
     if payload.get("error"):
         raise ValueError(payload["error"].get("message", "NOAA API error"))
     data = pd.DataFrame(payload.get("data", []))
@@ -210,7 +175,6 @@ def fetch_noaa(station: str, product: str, days: int = 90) -> pd.Series:
     data["time"] = pd.to_datetime(data["t"], utc=True, errors="coerce")
     data["value"] = pd.to_numeric(data["v"], errors="coerce")
     return data.dropna(subset=["time", "value"]).set_index("time")["value"].groupby(level=0).median().sort_index()
-
 
 
 def hourly_history(
@@ -256,6 +220,7 @@ def hourly_history(
         ("salinity_PSU", "salinity"),
     ]:
         noaa_filled = 0
+        noaa_error = None
 
         if noaa_station.strip() and hourly[col].isna().any():
             try:
@@ -283,7 +248,7 @@ def hourly_history(
                 noaa_filled = int(mask.sum())
 
             except Exception as exc:
-                notes[col] = f"NOAA CO-OPS unavailable: {exc}"
+                noaa_error = f"NOAA CO-OPS unavailable: {exc}"
 
         available_sources = hourly_provenance.loc[
             hourly_provenance[col] != "Missing",
@@ -296,10 +261,15 @@ def hourly_history(
             else "Unavailable"
         )
 
-        notes[col] = (
-            f"Latest: {latest_source}; "
-            f"NOAA filled {noaa_filled} hourly gaps"
-        )
+        if noaa_error:
+            notes[col] = noaa_error
+        elif not noaa_station.strip():
+            notes[col] = f"Latest: {latest_source}; NOAA fallback not configured"
+        else:
+            notes[col] = (
+                f"Latest: {latest_source}; "
+                f"NOAA filled {noaa_filled} hourly gaps"
+            )
 
     for col in ["DO_mgL", "pH"]:
         available_sources = hourly_provenance.loc[
@@ -314,7 +284,6 @@ def hourly_history(
         )
 
     return hourly, hourly_provenance, notes
-
 
 
 def normalize_station(value) -> str:
@@ -406,6 +375,7 @@ def choose_method(hierarchy: pd.DataFrame, metrics: pd.DataFrame, station: str, 
 
     return "xgboost"
 
+
 def build_feature_history(history: pd.DataFrame) -> pd.DataFrame:
     feature_rows = []
     timestamps = []
@@ -422,7 +392,7 @@ def build_feature_history(history: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> dict:
+def build_station_adaptation(history: pd.DataFrame, hourly_provenance: pd.DataFrame, station: str, _assets) -> dict:
     models, hierarchies, metrics = _assets
     feature_history = build_feature_history(history)
     if feature_history.empty:
@@ -437,11 +407,27 @@ def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> di
 
         for horizon in range(1, 25):
             method = choose_method(hierarchies[key], metrics[key], station, horizon)
-            target_times = origins + pd.Timedelta(hours=horizon)
-            actual = history[col].reindex(target_times).to_numpy(dtype=float)
-            valid = np.isfinite(actual)
+            valid_origins = []
+            actual_list = []
+            baseline_list = []
+            source_list = []
 
-            if not valid.any():
+            for origin in origins:
+                target_time = origin + pd.Timedelta(hours=horizon)
+                if target_time not in history.index or target_time not in hourly_provenance.index:
+                    continue
+                if pd.isna(history.at[target_time, col]):
+                    continue
+                source = hourly_provenance.at[target_time, col]
+                if source not in ("USGS Direct", "NOAA CO-OPS"):
+                    continue
+                source_list.append(source)
+                actual = history.at[target_time, col]
+                valid_origins.append(origin)
+                actual_list.append(actual)
+                baseline_list.append(history.at[origin, col])
+
+            if not valid_origins:
                 adaptation[key][horizon] = {
                     "correction": 0.0,
                     "examples": 0,
@@ -451,12 +437,13 @@ def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> di
                     "validation_mae_before": None,
                     "validation_mae_after": None,
                     "validation_examples": 0,
+                    "source_counts": {"USGS Direct": 0, "NOAA CO-OPS": 0},
                 }
                 continue
 
-            valid_origins = origins[valid]
-            actual = actual[valid]
-            baseline = history[col].reindex(valid_origins).to_numpy(dtype=float)
+            valid_origins = pd.DatetimeIndex(valid_origins)
+            actual = np.array(actual_list, dtype=float)
+            baseline = np.array(baseline_list, dtype=float)
 
             if method == "xgboost":
                 model = models[key][horizon]
@@ -479,8 +466,15 @@ def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> di
             finite = np.isfinite(errors)
             errors = errors[finite]
             error_times = valid_origins[finite]
+            valid_sources = np.asarray(source_list, dtype=object)[finite]
+
             order = np.argsort(error_times)
             errors = errors[order]
+            valid_sources = valid_sources[order]
+            source_counts = {
+                "USGS Direct": int(np.sum(valid_sources == "USGS Direct")),
+                "NOAA CO-OPS": int(np.sum(valid_sources == "NOAA CO-OPS")),
+            }
             count = int(errors.size)
 
             correction = 0.0
@@ -513,8 +507,7 @@ def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> di
                     validated = validation_mae_after < validation_mae_before
 
                     if validated:
-                        full_confidence = min(1.0, count / FULL_ADAPTATION_EXAMPLES)
-                        correction = median_error * full_confidence
+                        correction = trial_correction
 
             adaptation[key][horizon] = {
                 "correction": float(correction),
@@ -525,9 +518,11 @@ def build_station_adaptation(history: pd.DataFrame, station: str, _assets) -> di
                 "validation_mae_before": validation_mae_before,
                 "validation_mae_after": validation_mae_after,
                 "validation_examples": validation_count,
+                "source_counts": source_counts,
             }
 
     return adaptation
+
 
 def make_forecast(history: pd.DataFrame, station: str, assets, adaptation: dict) -> pd.DataFrame:
     models, hierarchies, metrics = assets
@@ -588,16 +583,17 @@ def make_forecast(history: pd.DataFrame, station: str, assets, adaptation: dict)
     return pd.DataFrame(forecasts)
 
 
-st.markdown('<div class="hero"><h1>🌊 Water Management AI</h1></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>🌊 AquaSentry</h1><p>Predicting water conditions. Protecting aquatic ecosystems.</p></div>', unsafe_allow_html=True)
+
 with st.sidebar:
-    st.header("Monitoring station")
+    st.header("Station")
     choice = st.selectbox("USGS station", list(STATIONS))
     station = st.text_input("USGS station ID", "") if STATIONS[choice] == "custom" else STATIONS[choice]
     noaa = st.text_input(
         "Optional NOAA CO-OPS station ID",
         help="Used to fill missing temperature or salinity observations.",
     )
-    refresh = st.button("Refresh data", use_container_width=True)
+    refresh = st.button("Refresh", use_container_width=True)
 
 if refresh:
     st.cache_data.clear()
@@ -608,19 +604,19 @@ if not re.fullmatch(r"\d{8}(\d{7})?", station.strip()):
 
 try:
     assets = load_assets()
-with st.spinner("Loading...."):
-    raw_history, raw_provenance = fetch_usgs(station.strip())
-
-    history, hourly_provenance, source_notes = hourly_history(
-        raw_history,
-        raw_provenance,
-        noaa,
-    )
+    with st.spinner("Loading station observations..."):
+        raw_history, raw_provenance = fetch_usgs(station.strip())
+        history, hourly_provenance, source_notes = hourly_history(
+            raw_history,
+            raw_provenance,
+            noaa,
+        )
 except Exception as exc:
-    st.error(f"Could not load: {exc}")
+    st.error(f"Could not load station data: {exc}")
     st.stop()
 
-st.subheader(f"Station {station.strip()}")
+st.subheader(f"Station: {station.strip()}")
+
 cols = st.columns(4)
 for i, (label, meta) in enumerate(VARIABLES.items()):
     series = history[meta["column"]].dropna()
@@ -644,9 +640,9 @@ for i, (label, meta) in enumerate(VARIABLES.items()):
             )
 
 try:
-    with st.spinner("Updating station-specific adaptation from recent measurements…"):
-        adaptation = build_station_adaptation(history, station.strip(), assets)
-    forecast = make_forecast(history, station.strip(), assets, adaptation)
+    with st.spinner("Updating station adjustment from recent measurements..."):
+        adaptation = build_station_adaptation(history, hourly_provenance, station.strip(), assets)
+        forecast = make_forecast(history, station.strip(), assets, adaptation)
 except Exception as exc:
     st.warning(f"Forecast unavailable: {exc}")
     st.stop()
@@ -654,7 +650,39 @@ except Exception as exc:
 origin = forecast["origin"].iloc[0]
 start, end = origin - pd.Timedelta(hours=24), origin + pd.Timedelta(hours=24)
 
-st.subheader("Automatic station adaptation")
+# Forecast origin freshness indicator
+latest_obs_time = history.dropna(how="all").index[-1] if not history.empty else origin
+origin_age_hours = (latest_obs_time - origin).total_seconds() / 3600.0
+
+current_time = pd.Timestamp.now(tz="UTC")
+latest_data_age_hours = (
+    current_time - latest_obs_time
+).total_seconds() / 3600.0
+
+st.subheader("Forecast origin & freshness")
+fresh_col1, fresh_col2, fresh_col3 = st.columns(3)
+with fresh_col1:
+    st.metric("Forecast Origin (UTC)", origin.strftime("%Y-%m-%d %H:%M"))
+with fresh_col2:
+    st.metric("Latest Observation (UTC)", latest_obs_time.strftime("%Y-%m-%d %H:%M"))
+with fresh_col3:
+    if origin_age_hours > 3.0:
+        st.metric("Origin Age", f"{origin_age_hours:.1f} hours", delta="Delayed (>3h)", delta_color="inverse")
+    else:
+        st.metric("Origin Age", f"{origin_age_hours:.1f} hours", delta="Fresh (≤3h)", delta_color="normal")
+
+if origin_age_hours > 3.0:
+    st.warning(f"⚠️ Forecast origin is {origin_age_hours:.1f} hours behind the latest available observation. Predictions are based on the complete feature history up to {origin.strftime('%Y-%m-%d %H:%M UTC')}.")
+else:
+    st.success(f"✅ Forecast origin is up to date (age: {origin_age_hours:.1f} hours).")
+
+if latest_data_age_hours > 3.0:
+    st.warning(
+        f"Latest observations are {latest_data_age_hours:.1f} hours old. "
+        "The station data may be delayed."
+    )
+
+st.subheader("Station adjustment")
 adaptation_rows = []
 for label, meta in VARIABLES.items():
     key = meta["key"]
@@ -681,17 +709,18 @@ for index, row in enumerate(adaptation_rows):
             f'{row["Historical examples"]} max examples'
         )
 st.caption(
-    "Corrections are learned from historical forecasts simulated using only measurements "
-    "available at each past forecast origin. A correction is applied only after at least "
-    f"{MIN_ADAPTATION_EXAMPLES} valid examples; its strength increases up to "
-    f"{FULL_ADAPTATION_EXAMPLES} examples."
+    "Corrections are learned from historical forecasts simulated using only "
+    "measurements available at each past forecast origin. A correction is "
+    "considered only when at least 18 valid examples are available: "
+    "12 for training and 6 for chronological validation. It is applied "
+    "only when it improves validation MAE."
 )
 
 fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.11)
 colors = {
     "observed": "#1769aa",
-    "forecast": "#53a4dc",
-    "original": "#8a98a8",
+    "forecast": "#328cc4",
+    "original": "#58738d",
 }
 for row, (label, meta) in enumerate(VARIABLES.items(), start=1):
     col = meta["column"]
@@ -707,7 +736,7 @@ for row, (label, meta) in enumerate(VARIABLES.items(), start=1):
                 name="Observed",
                 legendgroup="observed",
                 showlegend=row == 1,
-                line={"color": colors["observed"], "width": 2.8},
+                line={"color": colors["observed"], "width": 2.5},
                 hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}<extra>Observed</extra>",
             ),
             row=row,
@@ -724,7 +753,7 @@ for row, (label, meta) in enumerate(VARIABLES.items(), start=1):
                     name="Original model",
                     legendgroup="original",
                     showlegend=row == 1,
-                    line={"color": colors["original"], "width": 1.8, "dash": "dot"},
+                    line={"color": colors["original"], "width": 1.5, "dash": "dot"},
                     hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}<extra>Original model</extra>",
                 ),
                 row=row,
@@ -736,17 +765,17 @@ for row, (label, meta) in enumerate(VARIABLES.items(), start=1):
                 x=subset.timestamp,
                 y=subset.prediction,
                 mode="lines+markers",
-                name="Station-adapted forecast",
+                name="Station-adjusted forecast",
                 legendgroup="forecast",
                 showlegend=row == 1,
-                line={"color": colors["forecast"], "width": 2.5, "dash": "dash"},
-                marker={"size": 5},
+                line={"color": colors["forecast"], "width": 2.2},
+                marker={"size": 4},
                 customdata=subset[["station_correction", "adaptation_examples"]].to_numpy(),
                 hovertemplate=(
                     "%{x|%b %d %H:%M} UTC<br>%{y:.2f}"
                     "<br>Correction: %{customdata[0]:+.3f}"
                     "<br>Historical examples: %{customdata[1]}"
-                    "<extra>Station-adapted forecast</extra>"
+                    "<extra>Station-adjusted forecast</extra>"
                 ),
             ),
             row=row,
@@ -759,7 +788,7 @@ for row, (label, meta) in enumerate(VARIABLES.items(), start=1):
         col=1,
         gridcolor="#e3edf6",
         zerolinecolor="#d4e2ef",
-        title_font={"size": 12},
+        title_font={"size": 11},
     )
 
 fig.add_vline(x=origin, line_width=1.5, line_dash="dot", line_color="#e4a43b")
@@ -768,7 +797,7 @@ fig.add_annotation(
     y=1.015,
     xref="x",
     yref="paper",
-    text="NOW",
+    text="FORECAST ORIGIN",
     showarrow=False,
     font={"size": 10, "color": "#805916"},
     bgcolor="#fff7e6",
@@ -776,27 +805,30 @@ fig.add_annotation(
 )
 fig.update_xaxes(range=[start, end], title_text="Time (UTC)", row=4, col=1, gridcolor="#edf2f8")
 fig.update_layout(
-    height=1080,
+    height=1000,
     hovermode="x unified",
     plot_bgcolor="white",
     paper_bgcolor="rgba(255,255,255,0)",
-    font={"family": "DM Sans, sans-serif", "color": "#29495b"},
-    legend={"orientation": "h", "y": 1.045, "x": .62},
-    margin={"t": 80, "b": 45, "l": 125, "r": 22},
+    font={"family": "DM Sans, sans-serif", "color": "#18324b"},
+    legend={"orientation": "h", "y": 1.04, "x": 0.5, "xanchor": "center"},
+    margin={"t": 70, "b": 40, "l": 110, "r": 20},
 )
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-with st.expander("Adaptation details and historical corrections"):
+with st.expander("Adjustment details"):
     detail_rows = []
     for label, meta in VARIABLES.items():
         key = meta["key"]
         for horizon in range(1, 25):
             item = adaptation.get(key, {}).get(horizon, {})
+            sc = item.get("source_counts", {"USGS Direct": 0, "NOAA CO-OPS": 0})
             detail_rows.append({
                 "Parameter": label,
                 "Horizon": f"+{horizon}h",
                 "Selected base method": item.get("method", "unavailable"),
                 "Historical examples": item.get("examples", 0),
+                "USGS Direct examples": sc.get("USGS Direct", 0),
+                "NOAA CO-OPS examples": sc.get("NOAA CO-OPS", 0),
                 "Median historical error": item.get("median_error", 0.0),
                 "Applied correction": item.get("correction", 0.0),
                 "Validated": item.get("validated", False),
@@ -825,7 +857,7 @@ with st.expander("Adaptation details and historical corrections"):
     ]
     st.dataframe(comparison, use_container_width=True, hide_index=True)
 
-with st.expander("Data sources and forecast details"):
+with st.expander("Data sources"):
     source_rows = []
     for label, meta in VARIABLES.items():
         valid = history[meta["column"]].dropna()
@@ -840,11 +872,6 @@ with st.expander("Data sources and forecast details"):
     st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
     for note in source_notes.values():
         st.caption(note)
-    st.caption(
-        "Blue solid lines show observed readings; lighter blue dashed lines show station-adapted "
-        "forecasts; gray dotted lines show original model forecasts when adaptation changes them. "
-        "Forecasts are not a substitute for field measurements."
-    )
 
 st.caption(
     "Forecasts use XGBoost or persistence based on the station validation hierarchy, then apply "
