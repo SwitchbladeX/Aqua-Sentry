@@ -84,20 +84,6 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
         )
         response.raise_for_status()
         series = response.json().get("value", {}).get("timeSeries", [])
-        st.write(
-            "USGS raw parameter metadata:",
-            [
-                {
-                    "codes": [
-                        code.get("value")
-                        for code in item.get("variable", {}).get("variableCode", [])
-                    ],
-                    "description": item.get("variable", {}).get("variableDescription"),
-                    "value_groups": len(item.get("values", [])),
-                }
-                for item in series
-            ],
-        )
     except Exception as exc:
         raise ValueError(f"USGS API request failed: {exc}")
 
@@ -621,21 +607,6 @@ try:
     assets = load_assets()
     with st.spinner("Loading station observations..."):
         raw_history, raw_provenance = fetch_usgs(station.strip())
-
-    st.write("USGS columns returned:", raw_history.columns.tolist())
-
-    if "salinity_PSU" in raw_history.columns:
-        st.write(
-            "Raw salinity observations:",
-            raw_history["salinity_PSU"].notna().sum()
-        )
-        st.write(
-            "Latest raw salinity readings:",
-            raw_history["salinity_PSU"].dropna().tail(10)
-        )
-    else:
-        st.error("USGS did not return a salinity_PSU column.")
-
     history, hourly_provenance, source_notes = hourly_history(
     raw_history,
     raw_provenance,
