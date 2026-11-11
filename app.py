@@ -60,18 +60,105 @@ st.markdown("""
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_usgs(site: str, days: int = 90) -> pd.DataFrame:
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
     response = requests.get(
         "https://waterservices.usgs.gov/nwis/iv/",
         params={
             "format": "json",
             "sites": site,
-            "parameterCd": "00010,00300,00400,00480,90860",
+            "parameterCd": "00010,00300,00400,00480",
             "period": f"P{days}D",
         },
         timeout=45,
-        headers={"User-Agent": "WaterManagementAI/1.0"},
+        headers={"User-Agent": "HydroSentinel/1.0"},
     )
+    response.raise_for_status()
+
+    series = response.json().get("value", {}).get("timeSeries", [])
+
+    mapping = {
+        meta["code"]: meta["column"]
+        for meta in VARIABLES.values()
+    }
+
+    parts = []
+
+    for item in series:
+        codes = item.get("variable", {}).get("variableCode", [])
+        groups = item.get("values", [])
+
+        if not codes or not groups:
+            continue
+
+        col = mapping.get(codes[0].get("value"))
+
+        if col is None:
+            continue
+
+        data = pd.DataFrame(groups[0].get("value", []))
+
+        if not {"dateTime", "value"}.issubset(data.columns):
+            continue
+
+        data["time"] = pd.to_datetime(
+            data["dateTime"],
+            utc=True,
+            errors="coerce",
+        )
+
+        data[col] = pd.to_numeric(
+            data["value"],
+            errors="coerce",
+        )
+
+        data = data.dropna(subset=["time", col])
+
+        if data.empty:
+            continue
+
+        measurements = (
+            data.set_index("time")[[col]]
+            .groupby(level=0)
+            .median()
+            .sort_index()
+        )
+
+        parts.append(measurements)
+
+    if not parts:
+        raise ValueError(
+            "USGS returned no supported water-quality observations."
+        )
+
+    raw = (
+        pd.concat(parts, axis=1)
+        .groupby(level=0)
+        .median(numeric_only=True)
+        .sort_index()
+    )
+
+    raw = raw.loc[:, ~raw.columns.duplicated()]
+    raw.index.name = "time"
+
+    provenance = pd.DataFrame(
+        "Missing",
+        index=raw.index,
+        columns=raw.columns,
+    )
+
+    provenance[raw.notna()] = "USGS Direct"
+
+    return raw, provenance
+
+
+    for col in raw.columns:
+        provenance.loc[raw[col].notna(), col] = "USGS Direct"
+
+    return raw, provenance
+
     response.raise_for_status()
     series = response.json().get("value", {}).get("timeSeries", [])
     mapping = {meta["code"]: meta["column"] for meta in VARIABLES.values()}
@@ -125,25 +212,109 @@ def fetch_noaa(station: str, product: str, days: int = 90) -> pd.Series:
     return data.dropna(subset=["time", "value"]).set_index("time")["value"].groupby(level=0).median().sort_index()
 
 
-def hourly_history(raw: pd.DataFrame, noaa_station: str) -> tuple[pd.DataFrame, dict[str, str]]:
+
+def hourly_history(
+    raw: pd.DataFrame,
+    provenance: pd.DataFrame,
+    noaa_station: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
+
     raw = raw.copy()
+    provenance = provenance.copy()
+
     raw.index = pd.to_datetime(raw.index, utc=True)
-    result = raw.sort_index().resample("1h").median(numeric_only=True)
+    provenance.index = pd.to_datetime(provenance.index, utc=True)
+
+    raw = raw.sort_index()
+    provenance = provenance.reindex(raw.index)
+
+    hourly = raw.resample("1h").median()
+
     for col in VALUE_COLUMNS:
-        if col not in result:
-            result[col] = np.nan
-    result = result[VALUE_COLUMNS]
+        if col not in hourly.columns:
+            hourly[col] = np.nan
+
+    hourly = hourly[VALUE_COLUMNS]
+
+    hourly_provenance = pd.DataFrame(
+        "Missing",
+        index=hourly.index,
+        columns=VALUE_COLUMNS,
+    )
+
+    for col in VALUE_COLUMNS:
+        if col in raw.columns:
+            direct_count = raw[col].resample("1h").count()
+            hourly_provenance.loc[
+                direct_count > 0, col
+            ] = "USGS Direct"
+
     notes = {}
-    for col, product in [("temp_C", "water_temperature"), ("salinity_PSU", "salinity")]:
-        if noaa_station.strip() and result[col].isna().any():
+
+    for col, product in [
+        ("temp_C", "water_temperature"),
+        ("salinity_PSU", "salinity"),
+    ]:
+        noaa_filled = 0
+
+        if noaa_station.strip() and hourly[col].isna().any():
             try:
-                fallback = fetch_noaa(noaa_station.strip(), product).resample("1h").median().reindex(result.index)
-                mask = result[col].isna() & fallback.notna()
-                result.loc[mask, col] = fallback.loc[mask]
-                notes[col] = f"NOAA CO-OPS filled {int(mask.sum())} hourly gaps"
+                fallback = fetch_noaa(
+                    noaa_station.strip(),
+                    product,
+                )
+
+                fallback.index = pd.to_datetime(
+                    fallback.index,
+                    utc=True,
+                )
+
+                fallback = (
+                    fallback.resample("1h")
+                    .median()
+                    .reindex(hourly.index)
+                )
+
+                mask = hourly[col].isna() & fallback.notna()
+
+                hourly.loc[mask, col] = fallback.loc[mask]
+                hourly_provenance.loc[mask, col] = "NOAA CO-OPS"
+
+                noaa_filled = int(mask.sum())
+
             except Exception as exc:
                 notes[col] = f"NOAA CO-OPS unavailable: {exc}"
-    return result, notes
+
+        available_sources = hourly_provenance.loc[
+            hourly_provenance[col] != "Missing",
+            col,
+        ]
+
+        latest_source = (
+            available_sources.iloc[-1]
+            if not available_sources.empty
+            else "Unavailable"
+        )
+
+        notes[col] = (
+            f"Latest: {latest_source}; "
+            f"NOAA filled {noaa_filled} hourly gaps"
+        )
+
+    for col in ["DO_mgL", "pH"]:
+        available_sources = hourly_provenance.loc[
+            hourly_provenance[col] != "Missing",
+            col,
+        ]
+
+        notes[col] = (
+            f"Latest: {available_sources.iloc[-1]}"
+            if not available_sources.empty
+            else "Unavailable"
+        )
+
+    return hourly, hourly_provenance, notes
+
 
 
 def normalize_station(value) -> str:
@@ -437,10 +608,16 @@ if not re.fullmatch(r"\d{8}(\d{7})?", station.strip()):
 
 try:
     assets = load_assets()
-    with st.spinner("Loading station observations…"):
-        history, source_notes = hourly_history(fetch_usgs(station.strip()), noaa)
+with st.spinner("Loading...."):
+    raw_history, raw_provenance = fetch_usgs(station.strip())
+
+    history, hourly_provenance, source_notes = hourly_history(
+        raw_history,
+        raw_provenance,
+        noaa,
+    )
 except Exception as exc:
-    st.error(f"Could not load station data or model assets: {exc}")
+    st.error(f"Could not load: {exc}")
     st.stop()
 
 st.subheader(f"Station {station.strip()}")
