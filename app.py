@@ -607,11 +607,27 @@ try:
     assets = load_assets()
     with st.spinner("Loading station observations..."):
         raw_history, raw_provenance = fetch_usgs(station.strip())
-        history, hourly_provenance, source_notes = hourly_history(
-            raw_history,
-            raw_provenance,
-            noaa,
+
+    st.write("USGS columns returned:", raw_history.columns.tolist())
+
+    if "salinity_PSU" in raw_history.columns:
+        st.write(
+            "Raw salinity observations:",
+            raw_history["salinity_PSU"].notna().sum()
         )
+        st.write(
+            "Latest raw salinity readings:",
+            raw_history["salinity_PSU"].dropna().tail(10)
+        )
+    else:
+        st.error("USGS did not return a salinity_PSU column.")
+
+    history, hourly_provenance, source_notes = hourly_history(
+    raw_history,
+    raw_provenance,
+    noaa,
+)
+
 except Exception as exc:
     st.error(f"Could not load station data: {exc}")
     st.stop()
@@ -651,7 +667,6 @@ except Exception as exc:
 origin = forecast["origin"].iloc[0]
 start, end = origin - pd.Timedelta(hours=24), origin + pd.Timedelta(hours=24)
 
-# Forecast origin freshness indicator
 latest_obs_time = history.dropna(how="all").index[-1] if not history.empty else origin
 origin_age_hours = (latest_obs_time - origin).total_seconds() / 3600.0
 
