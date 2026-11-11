@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import re
 from datetime import datetime, timedelta, timezone
@@ -45,7 +46,7 @@ STATIONS = {
     "Hempstead Bay at Freeport, NY — 01304998": "01304998",
     "Enter a different USGS station": "custom",
 }
-# Retained for compatibility; not used to infer station identity or NOAA co-location.
+# Retained, but coordinates are not used to infer station identity or co-location.
 STATION_METADATA = {
     "01303152": {"name": "West Harbor at Oyster Bay, NY", "lat": 40.8784, "lon": -73.5352},
     "01304562": {"name": "Peconic River at Riverhead, NY", "lat": 40.9234, "lon": -72.6687},
@@ -59,32 +60,48 @@ STYLE = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
 :root {color-scheme:light;}
-html, body, .stApp, .stApp input, .stApp button, .stApp select {font-family:'DM Sans',sans-serif;}
-.stApp {background:#f4f8fc;color:#183b56;}
+html,body,.stApp,.stApp input,.stApp button,.stApp select {font-family:'DM Sans',sans-serif;}
+.stApp,[data-testid="stAppViewContainer"] {background:#0b1d35;color:#e8f0fa;}
 [data-testid="stHeader"] {background:transparent !important;box-shadow:none !important;border:none !important;backdrop-filter:none !important;}
-.block-container {max-width:1460px;padding-top:4rem;padding-bottom:2rem;}
-[data-testid="stSidebar"] {background:#eaf2fb;border-right:1px solid #d9e5f2;}
-[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {padding-top:1.5rem;}
+.block-container {max-width:1460px;padding-top:3.5rem;padding-bottom:2rem;}
+[data-testid="stSidebar"] {background:#19344f;border-right:1px solid #2b4865;}
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {padding-top:0 !important;}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {gap:.85rem;}
 [data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3,
 [data-testid="stSidebar"] label,[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {color:#234b6c !important;}
-[data-testid="stMetric"] {background:#fff;border:1px solid #dce7f2;border-radius:16px;padding:16px 18px;box-shadow:0 4px 16px rgba(30,74,115,.035);}
-[data-testid="stMetricLabel"] {color:#60798e;}
-[data-testid="stMetricValue"] {color:#183f60;font-size:1.8rem;}
-[data-testid="stExpander"] {background:#fff;border:1px solid #dce7f2;border-radius:12px;}
-.stButton > button,.stDownloadButton > button,
-[data-testid="stBaseButton-primary"] {background:#246fba !important;color:#fff !important;border:1px solid #246fba !important;border-radius:10px;min-height:44px;font-weight:600;transition:transform .16s ease,box-shadow .16s ease,background .16s ease;}
-.stButton > button:hover,.stDownloadButton > button:hover {transform:scale(1.025);background:#195b9d !important;box-shadow:0 5px 14px rgba(36,111,186,.18);}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {color:#e8f0fa !important;}
+[data-testid="stSidebar"] h3 {padding-top:0;margin-top:0;}
+[data-testid="stSidebar"] input {background:#f4f7fb !important;color:#19344f !important;-webkit-text-fill-color:#19344f !important;}
+[data-testid="stSidebar"] [data-baseweb="select"] > div {background:#f4f7fb !important;color:#19344f !important;border-color:#d7e2ee !important;}
+[data-testid="stMetric"] {background:#fff;border:1px solid #dfe7f1;border-radius:16px;padding:16px 18px;box-shadow:0 6px 20px rgba(0,0,0,.08);}
+[data-testid="stMetricLabel"] {color:#60798e !important;}
+[data-testid="stMetricValue"] {color:#183f60 !important;font-size:1.8rem;}
+[data-testid="stMain"] h2,[data-testid="stMain"] h3 {color:#edf3fc;}
+[data-testid="stMain"] [data-testid="stCaptionContainer"] {color:#b3c5da;}
+[data-testid="stExpander"] {background:#fff;color:#234b6c;border:1px solid #dce7f2;border-radius:12px;}
+[data-testid="stExpander"] summary,[data-testid="stExpander"] label,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] {color:#234b6c !important;}
+[data-testid="stExpander"] [data-testid="stCaptionContainer"] {color:#60798e !important;}
+[data-testid="stSidebar"] [data-testid="stExpander"] label,
+[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] {color:#234b6c !important;}
+.stButton > button,.stDownloadButton > button,[data-testid="stBaseButton-primary"] {background:#246fba !important;color:#fff !important;border:1px solid #246fba !important;border-radius:10px;min-height:44px;font-weight:600;transition:transform .16s ease,box-shadow .16s ease,background .16s ease;}
+.stButton > button:hover,.stDownloadButton > button:hover {transform:scale(1.025);background:#195b9d !important;box-shadow:0 5px 14px rgba(36,111,186,.25);}
 .stButton > button:active,.stDownloadButton > button:active {transform:scale(.99);}
 .stButton > button:focus-visible,.stDownloadButton > button:focus-visible {outline:3px solid #a9cff6;outline-offset:3px;}
-.hero {background:linear-gradient(115deg,#17466e,#246fba 70%,#438ed0);border-radius:20px;padding:25px 30px;margin-bottom:14px;color:#fff;}
-.hero h1 {color:#fff;font-size:2.65rem;letter-spacing:-.045em;padding:0 0 6px;margin:0;line-height:1.15;}
-.hero p {color:#e6f0fc;margin:0;font-size:1rem;}
-.station-id {font-size:.76rem;color:#698298;margin-top:4px;}
-.station-title {font-size:1.35rem;font-weight:700;color:#214a6b;margin:3px 0 6px;}
-.footer {border-top:1px solid #dce6f0;margin-top:18px;padding-top:10px;color:#71879b;font-size:.78rem;}
-@media(prefers-reduced-motion:reduce){.stButton > button,.stDownloadButton > button {transition:none;}}
-@media(max-width:700px){.hero{padding:22px}.hero h1{font-size:2.1rem}[data-testid="stMetricValue"]{font-size:1.45rem}.block-container{padding-top:3.8rem}}
+.stButton > button p,.stDownloadButton > button p,
+[data-testid="stSidebar"] .stButton > button p,
+[data-testid="stSidebar"] .stButton > button [data-testid="stMarkdownContainer"] {color:#fff !important;}
+.hero {display:flex;align-items:center;gap:20px;background:#fff;border:1px solid #dfe7f1;border-radius:20px;padding:26px 30px;margin-bottom:18px;box-shadow:0 10px 30px rgba(0,0,0,.12);}
+.hero h1 {color:#153856;font-size:2.65rem;letter-spacing:-.045em;padding:0 0 6px;margin:0;line-height:1.15;}
+.hero p {color:#59738b;margin:0;font-size:1rem;}
+.brand-logo {width:82px;height:82px;flex:0 0 82px;border-radius:50%;object-fit:contain;background:#fff;border:1px solid #e1e9f2;padding:4px;}
+.station-id {font-size:.76rem;color:#a6bdd5;margin-top:4px;}
+.station-title {font-size:1.35rem;font-weight:700;color:#f0f5fc;margin:3px 0 6px;}
+[data-testid="stPlotlyChart"] {background:#fff;border:1px solid #dfe7f1;border-radius:18px;padding:10px;overflow:hidden;}
+.footer {border-top:1px solid #2b425d;margin-top:18px;padding-top:10px;color:#a6bdd5;font-size:.78rem;}
+@media(prefers-reduced-motion:reduce){.stButton > button,.stDownloadButton > button{transition:none;}}
+@media(max-width:700px){.hero{gap:14px;padding:20px}.hero h1{font-size:2rem}.hero p{font-size:.9rem}.brand-logo{width:60px;height:60px;flex-basis:60px}[data-testid="stMetricValue"]{font-size:1.45rem}.block-container{padding-top:3.8rem}}
 </style>
 """
 
@@ -99,8 +116,7 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
     response = requests.get(
         "https://waterservices.usgs.gov/nwis/iv/",
         params={"format": "json", "sites": site, "parameterCd": "00010,00300,00400,90860", "period": f"P{days}D"},
-        timeout=45,
-        headers={"User-Agent": "AquaSentry/1.1"},
+        timeout=45, headers={"User-Agent": "AquaSentry/1.1"},
     )
     response.raise_for_status()
     series = response.json().get("value", {}).get("timeSeries", [])
@@ -157,8 +173,7 @@ def fetch_noaa(station: str, product: str, days: int = 90) -> pd.Series:
                 "begin_date": cursor.strftime("%Y%m%d"), "end_date": stop.strftime("%Y%m%d"),
                 "station": station, "time_zone": "gmt", "units": "metric",
                 "format": "json", "interval": "h",
-            },
-            timeout=45,
+            }, timeout=45,
         )
         response.raise_for_status()
         payload = response.json()
@@ -329,8 +344,7 @@ def build_station_adaptation(history, hourly_provenance, station, signature, pol
                 "correction": 0.0, "examples": 0, "median_error": 0.0, "method": method,
                 "validated": False, "validation_mae_before": None, "validation_mae_after": None,
                 "validation_examples": 0, "training_examples": 0,
-                "source_counts": {"USGS Direct": 0, "NOAA CO-OPS": 0},
-                "status": "Insufficient examples",
+                "source_counts": {"USGS Direct": 0, "NOAA CO-OPS": 0}, "status": "Insufficient examples",
             }
             adaptation[key][horizon] = item
             if key == "salinity" and SALINITY_PERSISTENCE_ONLY:
@@ -346,8 +360,7 @@ def build_station_adaptation(history, hourly_provenance, station, signature, pol
             if not len(origins):
                 continue
             predicted, _ = base_predictions(
-                key, horizon, features.loc[origins],
-                history[col].reindex(origins).to_numpy(), _assets, method,
+                key, horizon, features.loc[origins], history[col].reindex(origins).to_numpy(), _assets, method,
             )
             errors = actual[valid] - predicted
             finite = np.isfinite(errors)
@@ -361,6 +374,7 @@ def build_station_adaptation(history, hourly_provenance, station, signature, pol
                 continue
             split = min(int(count * .7), count - MIN_VALIDATION_EXAMPLES)
             validation_start = origins[split]
+            # A target-bin median is only available after that hour has ended.
             train_mask = (origins[:split] + pd.Timedelta(hours=horizon + 1)) <= validation_start
             training_errors = errors[:split][train_mask]
             validation_errors = errors[split:]
@@ -447,16 +461,13 @@ def draw_forecast(history, forecast, hours):
             x=subset.timestamp, y=subset.prediction, mode="lines+markers",
             name="Forecast", legendgroup="forecast", showlegend=row == 1,
             customdata=subset[["method_source", "station_correction", "adaptation_examples"]].to_numpy(),
-            line=dict(color="#16a394", width=2.8, dash="dash"),
-            marker=dict(size=4, color="#16a394"),
+            line=dict(color="#16a394", width=2.8, dash="dash"), marker=dict(size=4, color="#16a394"),
             hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}" + unit + "<br>%{customdata[0]}<br>Adjustment: %{customdata[1]:+.3f}<extra>Forecast</extra>",
         ), row=row, col=1)
     fig.add_vrect(x0=origin, x1=end, fillcolor="#246fba", opacity=.035, line_width=0)
     fig.add_vline(x=origin, line_dash="dot", line_color="#95a9bb", line_width=1.4)
-    fig.add_annotation(
-        x=origin, y=1.065, xref="x", yref="paper", text="FORECAST START",
-        showarrow=False, font=dict(size=10, color="#70869a"),
-    )
+    fig.add_annotation(x=origin, y=1.065, xref="x", yref="paper", text="FORECAST START",
+                       showarrow=False, font=dict(size=10, color="#70869a"))
     fig.update_xaxes(range=[start, end], showline=False, zeroline=False,
                      gridcolor="#edf2f7", tickfont=dict(size=11, color="#70869a"))
     fig.update_xaxes(title_text="Time (UTC)", row=4, col=1)
@@ -514,8 +525,7 @@ def show_data_sources(history, sources, notes, expanded=False):
                 "Parameter": label,
                 "Latest hourly reading (UTC)": str(time) if time is not None else "Unavailable",
                 "Source": sources.at[time, meta["column"]] if time is not None else "Missing",
-                "Hourly observations": len(series),
-                "Notes": notes.get(meta["column"], "USGS Direct only"),
+                "Hourly observations": len(series), "Notes": notes.get(meta["column"], "USGS Direct only"),
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption("Readings are medians of completed hourly bins, labeled by the start of the hour. No interpolation or forward filling is used. Provisional USGS observations may be revised. NOAA fallback uses the station supplied in Settings; its location must be appropriate for the USGS site.")
@@ -525,6 +535,22 @@ def show_data_sources(history, sources, notes, expanded=False):
             st.write("Missing inputs for the latest hour:", ", ".join(missing) if missing else "None")
         st.caption("The forecasting pipeline retains the original 22-feature schema and all 96 model-file references. Salinity models are checked but not used for inference. Missing salinity still prevents complete model features for all four targets.")
         st.caption("Salinity uses the forecast-origin reading as an unadjusted constant. Its ML predictions and station corrections remain disabled pending retraining. No calibrated uncertainty or hypoxia-event classifier is implemented here.")
+
+
+def show_brand_banner():
+    logo_path = ROOT / "Logo.png"
+    logo_html = ""
+    if logo_path.is_file():
+        try:
+            encoded_logo = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            logo_html = '<img class="brand-logo" src="data:image/png;base64,' + encoded_logo + '" alt="AquaSentry logo">'
+        except OSError:
+            logo_html = ""
+    st.markdown(
+        '<div class="hero">' + logo_html + '<div><h1>AquaSentry</h1>'
+        '<p>Predicting water conditions. Protecting aquatic ecosystems.</p></div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def main():
@@ -547,11 +573,7 @@ def main():
                 "NOAA fallback station", key="noaa_fallback_station",
                 help="Optional. Fills missing temperature and salinity using the NOAA station you provide. Use an appropriate nearby station.",
             )
-    st.markdown(
-        '<div class="hero"><h1>AquaSentry</h1>'
-        '<p>Predicting water conditions. Protecting aquatic ecosystems.</p></div>',
-        unsafe_allow_html=True,
-    )
+    show_brand_banner()
     station = station.strip()
     if not re.fullmatch(r"\d{8}(\d{7})?", station):
         st.info("Select a station or enter an 8- or 15-digit USGS station ID.")
@@ -566,8 +588,7 @@ def main():
     name = raw.attrs.get("station_name", f"USGS {station}")
     st.markdown(
         '<div class="station-id">USGS ' + html.escape(station) + '</div>'
-        '<div class="station-title">' + html.escape(name) + '</div>',
-        unsafe_allow_html=True,
+        '<div class="station-title">' + html.escape(name) + '</div>', unsafe_allow_html=True,
     )
     st.caption("Latest hourly readings · All times UTC")
     now = pd.Timestamp.now(tz="UTC")
