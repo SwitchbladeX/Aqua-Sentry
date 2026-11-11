@@ -84,6 +84,20 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
         )
         response.raise_for_status()
         series = response.json().get("value", {}).get("timeSeries", [])
+        st.write(
+            "USGS raw parameter metadata:",
+            [
+                {
+                    "codes": [
+                        code.get("value")
+                        for code in item.get("variable", {}).get("variableCode", [])
+                    ],
+                    "description": item.get("variable", {}).get("variableDescription"),
+                    "value_groups": len(item.get("values", [])),
+                }
+                for item in series
+            ],
+        )
     except Exception as exc:
         raise ValueError(f"USGS API request failed: {exc}")
 
