@@ -76,7 +76,7 @@ def fetch_usgs(site: str, days: int = 90) -> tuple[pd.DataFrame, pd.DataFrame]:
             params={
                 "format": "json",
                 "sites": site,
-                "parameterCd": "00010,00300,00400,00480",
+                "parameterCd": "00010,00300,00400,90860",
                 "period": f"P{days}D",
             },
             timeout=45,
