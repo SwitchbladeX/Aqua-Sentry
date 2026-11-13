@@ -548,7 +548,7 @@ def show_brand_banner():
             logo_html = ""
     st.markdown(
         '<div class="hero">' + logo_html + '<div><h1>AquaSentry</h1>'
-        '<p>Predicting water conditions. Protecting aquatic ecosystems.</p></div></div>',
+        '<p>Predicting, Protecting, Preventing.</p></div></div>',
         unsafe_allow_html=True,
     )
 
