@@ -38,22 +38,11 @@ FULL_ADAPTATION_EXAMPLES = 48
 SALINITY_PERSISTENCE_ONLY = True
 PIPELINE_VERSION = "aquasentry-2026-ui-2"
 STATIONS = {
-    "West Harbor at Oyster Bay, NY — 01303152": "01303152",
-    "Peconic River at Riverhead, NY — 01304562": "01304562",
-    "South side of Shelter Island, NY — 01304200": "01304200",
-    "Orient Point Harbor, NY — 01304190": "01304190",
-    "Forge River at Mastic, NY — 01304057": "01304057",
-    "Hempstead Bay at Freeport, NY — 01304998": "01304998",
+    "Crabtree Swamp at Conway, SC — 02110701": "02110701",
+    "Waccamaw River at Conway Marina, SC — 02110704": "02110704",
+    "Spring Creek near Spring, TX — 08068500": "08068500",
+    "Potomac River at Little Falls near Washington, DC — 01646500": "01646500",
     "Enter a different USGS station": "custom",
-}
-# Retained, but coordinates are not used to infer station identity or co-location.
-STATION_METADATA = {
-    "01303152": {"name": "West Harbor at Oyster Bay, NY", "lat": 40.8784, "lon": -73.5352},
-    "01304562": {"name": "Peconic River at Riverhead, NY", "lat": 40.9234, "lon": -72.6687},
-    "01304200": {"name": "South side of Shelter Island, NY", "lat": 41.0543, "lon": -72.3382},
-    "01304190": {"name": "Orient Point Harbor, NY", "lat": 41.1440, "lon": -72.2351},
-    "01304057": {"name": "Forge River at Mastic, NY", "lat": 40.7812, "lon": -72.8590},
-    "01304998": {"name": "Hempstead Bay at Freeport, NY", "lat": 40.6354, "lon": -73.5801},
 }
 
 STYLE = """
