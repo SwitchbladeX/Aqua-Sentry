@@ -42,17 +42,30 @@ SALINITY_PERSISTENCE_ONLY = True
 INTERPOLATION_MAX_GAP_HOURS = 3
 PIPELINE_VERSION = "aquasentry-2026-ui-3-native-nan-interpolation"
 STATIONS = {
-    "West Harbor at Oyster Bay, NY, USA — 01303152": {"provider": "usgs", "id": "01303152"},
-    "Waccamaw River at Conway Marina, SC, USA — 02110704": {"provider": "usgs", "id": "02110704"},
-    "San Francisco Bay at Alcatraz Island, CA, USA — 374938122251801": {"provider": "usgs", "id": "374938122251801"},
-    "Mace Head buoy, Ireland — experimental": {"provider": "erddap", "id": "compass_mace_head", "server": "https://erddap.marine.ie/erddap"},
-    "L4 observatory, England — setup required": {"provider": "pending", "id": "l4", "url": "https://www.westernchannelobservatory.org.uk/buoys.php"},
-    "Saanich Inlet, Canada — setup required": {"provider": "pending", "id": "saanich", "url": "https://www.oceannetworks.ca/"},
-    "Boknis Eck, Germany — setup required": {"provider": "pending", "id": "boknis", "url": "https://www.bokniseck.de/data.html"},
-    "Maria Island, Tasmania, Australia — setup required": {"provider": "pending", "id": "maria", "url": "https://imos.org.au/facility/national-mooring-network/national-reference-stations"},
-    "Yongala, Queensland, Australia — setup required": {"provider": "pending", "id": "yongala", "url": "https://imos.org.au/facility/national-mooring-network/national-reference-stations"},
-    "Kangaroo Island, Australia — setup required": {"provider": "pending", "id": "kangaroo", "url": "https://imos.org.au/facility/national-mooring-network/national-reference-stations"},
-    "Enter a different USGS station": {"provider": "custom", "id": "custom"},
+    "Crabtree Swamp at Conway, SC — 02110701": {
+        "provider": "usgs",
+        "id": "02110701",
+    },
+    "Waccamaw River at Conway Marina, SC — 02110704": {
+        "provider": "usgs",
+        "id": "02110704",
+    },
+    "Spring Creek near Spring, TX — 08068500": {
+        "provider": "usgs",
+        "id": "08068500",
+    },
+    "Potomac River at Little Falls near Washington, DC — 01646500": {
+        "provider": "usgs",
+        "id": "01646500",
+    },
+    "West Harbor at Oyster Bay, NY — 01303152": {
+        "provider": "usgs",
+        "id": "01303152",
+    },
+    "Enter a different USGS station": {
+        "provider": "custom",
+        "id": "custom",
+    },
 }
 STYLE = """
 <style>
