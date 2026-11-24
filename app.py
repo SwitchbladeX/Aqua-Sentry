@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import base64
@@ -7,7 +6,8 @@ import io
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
+from zoneinfo import available_timezones
 
 import numpy as np
 import pandas as pd
@@ -20,13 +20,14 @@ import xgboost as xgb
 st.set_page_config(page_title="AquaSentry", layout="wide", initial_sidebar_state="expanded")
 ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "models"
-VARIABLES = {
+INPUT_VARIABLES = {
     "Dissolved oxygen": {"key": "do", "folder": "dissolved_oxygen", "prefix": "DO", "column": "DO_mgL", "unit": "mg/L", "code": "00300"},
     "Temperature": {"key": "temp", "folder": "temperature", "prefix": "Temp", "column": "temp_C", "unit": "°C", "code": "00010"},
     "pH": {"key": "ph", "folder": "ph", "prefix": "pH", "column": "pH", "unit": "pH", "code": "00400"},
     "Salinity": {"key": "salinity", "folder": "salinity", "prefix": "Salinity", "column": "salinity_PSU", "unit": "PSU", "code": "90860"},
 }
-VALUE_COLUMNS = [meta["column"] for meta in VARIABLES.values()]
+VARIABLES = {label: meta for label, meta in INPUT_VARIABLES.items() if meta["key"] != "salinity"}
+VALUE_COLUMNS = [meta["column"] for meta in INPUT_VARIABLES.values()]
 LAGS = [1, 3, 6, 12]
 FEATURE_COLUMNS = VALUE_COLUMNS + [f"{col}_lag{lag}h" for col in VALUE_COLUMNS for lag in LAGS] + ["hour", "month"]
 HIERARCHIES = {
@@ -40,32 +41,14 @@ MIN_VALIDATION_EXAMPLES = 6
 FULL_ADAPTATION_EXAMPLES = 48
 SALINITY_PERSISTENCE_ONLY = True
 INTERPOLATION_MAX_GAP_HOURS = 3
-PIPELINE_VERSION = "aquasentry-2026-ui-3-native-nan-interpolation"
+PIPELINE_VERSION = "aquasentry-20261124-three-parameters-timezones-health"
 STATIONS = {
-    "Crabtree Swamp at Conway, SC — 02110701": {
-        "provider": "usgs",
-        "id": "02110701",
-    },
-    "Waccamaw River at Conway Marina, SC — 02110704": {
-        "provider": "usgs",
-        "id": "02110704",
-    },
-    "Spring Creek near Spring, TX — 08068500": {
-        "provider": "usgs",
-        "id": "08068500",
-    },
-    "Potomac River at Little Falls near Washington, DC — 01646500": {
-        "provider": "usgs",
-        "id": "01646500",
-    },
-    "West Harbor at Oyster Bay, NY — 01303152": {
-        "provider": "usgs",
-        "id": "01303152",
-    },
-    "Enter a different USGS station": {
-        "provider": "custom",
-        "id": "custom",
-    },
+    "Crabtree Swamp at Conway, SC — 02110701": {"provider": "usgs", "id": "02110701", "timezone": "America/New_York"},
+    "Spring Creek near Spring, TX — 08068500": {"provider": "usgs", "id": "08068500", "timezone": "America/Chicago"},
+    "West Harbor at Oyster Bay, NY — 01303152": {"provider": "usgs", "id": "01303152", "timezone": "America/New_York"},
+    "Flax Pond at Old Field, NY — 01304057": {"provider": "usgs", "id": "01304057", "timezone": "America/New_York"},
+    "Peconic River at County Hwy 105, NY — 01304562": {"provider": "usgs", "id": "01304562", "timezone": "America/New_York"},
+    "Enter a different USGS station": {"provider": "custom", "id": "custom", "timezone": "UTC"},
 }
 STYLE = """
 <style>
@@ -117,6 +100,75 @@ html,body,.stApp,.stApp input,.stApp button,.stApp select {font-family:'DM Sans'
 """
 
 
+
+DISPLAY_TZ = "UTC"
+FRESHNESS_HOURS = 3
+TIMEZONE_CHOICES = ["Station local (automatic)", "UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney"]
+
+
+def format_time(value, tz=None):
+    if value is None or pd.isna(value):
+        return "Unavailable"
+    timestamp = pd.Timestamp(value)
+    timestamp = timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp
+    return timestamp.tz_convert(tz or DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)")
+
+
+def display_frame(frame):
+    result = frame.copy()
+    for column in result.columns:
+        if isinstance(result[column].dtype, pd.DatetimeTZDtype):
+            result[column] = result[column].map(format_time)
+    return result
+
+
+def export_forecast(forecast):
+    result = forecast.copy()
+    for column in ["origin", "timestamp"]:
+        if column in result:
+            result[column + "_utc"] = result[column].map(lambda t: pd.Timestamp(t).isoformat())
+            result[column + "_local"] = result[column].map(format_time)
+            result = result.drop(columns=column)
+    generated = forecast.attrs.get("generated_at_utc")
+    result["generated_at_utc"] = generated
+    result["generated_at_local"] = format_time(generated)
+    result["display_timezone"] = DISPLAY_TZ
+    return result
+
+
+def observation_health(raw):
+    now = pd.Timestamp.now(tz="UTC")
+    recent_hours = pd.date_range(now.floor("h") - pd.Timedelta(days=7), now.floor("h"), freq="h", inclusive="left")
+    rows = []
+    for label, meta in VARIABLES.items():
+        values = raw[meta["column"]].dropna().sort_index()
+        values = values.loc[values.index <= now]
+        latest = values.index[-1] if len(values) else None
+        age = (now - latest).total_seconds() / 3600 if latest is not None else np.nan
+        covered = values.resample("1h").count().reindex(recent_hours, fill_value=0).gt(0).sum() if len(values) else 0
+        rows.append({"Parameter": label, "Latest raw observation": format_time(latest), "Age (hours)": round(age, 2) if np.isfinite(age) else np.nan, "Completed hours with samples / 168": f"{covered}/168", "Feed status": "Unavailable" if latest is None else ("Fresh" if age <= FRESHNESS_HOURS else "Delayed")})
+    return pd.DataFrame(rows)
+
+
+def check_default_stations():
+    rows = []
+    for label, config in STATIONS.items():
+        if config["provider"] != "usgs":
+            continue
+        try:
+            records, _ = fetch_usgs(config["id"], days=7)
+            for parameter, meta in VARIABLES.items():
+                group = records.loc[records["column"].eq(meta["column"])]
+                now = pd.Timestamp.now(tz="UTC")
+                group = group.loc[group["time"] <= now]
+                latest = group["time"].max() if len(group) else pd.NaT
+                age = (now - latest).total_seconds() / 3600 if pd.notna(latest) else np.nan
+                rows.append({"Station": label, "Parameter": parameter, "Latest observation": format_time(latest), "Age (hours)": round(age, 2) if np.isfinite(age) else np.nan, "Separate series": group["series"].nunique(), "Status": "Unavailable" if pd.isna(latest) else ("Fresh series available" if age <= FRESHNESS_HOURS else "Delayed")})
+        except Exception as exc:
+            rows.append({"Station": label, "Parameter": "All", "Status": f"Provider request failed: {exc}"})
+    return pd.DataFrame(rows)
+
+
 def normalize_station(value):
     value = str(value).strip().replace("USGS-", "").removesuffix(".0")
     return value.zfill(8) if value.isdigit() and len(value) <= 8 else value
@@ -134,41 +186,88 @@ def clean_values(values, col):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_usgs(site, days=90):
-    response = requests.get(
-        "https://waterservices.usgs.gov/nwis/iv/",
-        params={"format": "json", "sites": site, "parameterCd": "00010,00300,00400,90860", "period": f"P{days}D"},
-        timeout=90, headers={"User-Agent": "AquaSentry/1.2"},
-    )
-    response.raise_for_status()
-    mapping = {meta["code"]: meta["column"] for meta in VARIABLES.values()}
-    parts, names = [], []
-    for item in response.json().get("value", {}).get("timeSeries", []):
-        codes = item.get("variable", {}).get("variableCode", [])
-        col = mapping.get(codes[0].get("value")) if codes else None
-        if col is None:
-            continue
-        name = item.get("sourceInfo", {}).get("siteName")
-        if name:
-            names.append(name)
-        sentinel = pd.to_numeric(item.get("variable", {}).get("noDataValue"), errors="coerce")
-        for number, group in enumerate(item.get("values", [])):
-            data = pd.DataFrame(group.get("value", []))
-            if not {"dateTime", "value"}.issubset(data.columns):
+    site = normalize_station(site)
+    if not re.fullmatch(r"\d{8,15}", site):
+        raise ValueError("Use an 8- to 15-digit numeric USGS station ID.")
+    mapping = {meta["code"]: meta["column"] for meta in INPUT_VARIABLES.values()}
+    parts, names, failures = [], [], []
+    try:
+        response = requests.get(
+            "https://waterservices.usgs.gov/nwis/iv/",
+            params={"format": "json", "sites": site, "parameterCd": ",".join(mapping), "period": f"P{days}D"},
+            timeout=(10, 35), headers={"User-Agent": "AquaSentry/1.3"},
+        )
+        response.raise_for_status()
+        for item in response.json().get("value", {}).get("timeSeries", []):
+            codes = item.get("variable", {}).get("variableCode", [])
+            col = mapping.get(codes[0].get("value")) if codes else None
+            if col is None:
                 continue
-            values = pd.to_numeric(data["value"], errors="coerce")
-            if pd.notna(sentinel):
-                values = values.mask(values == sentinel)
-            values = clean_values(values, col)
-            part = pd.DataFrame({
-                "time": pd.to_datetime(data["dateTime"], utc=True, errors="coerce"),
-                "column": col, "value": values,
-                "series": f"{item.get('name', col)} / group {number}",
-            }).dropna(subset=["time", "value"])
-            if not part.empty:
-                parts.append(part)
+            name = item.get("sourceInfo", {}).get("siteName")
+            if name:
+                names.append(name)
+            sentinel = pd.to_numeric(item.get("variable", {}).get("noDataValue"), errors="coerce")
+            for number, group in enumerate(item.get("values", [])):
+                data = pd.DataFrame(group.get("value", []))
+                if not {"dateTime", "value"}.issubset(data.columns):
+                    continue
+                values = pd.to_numeric(data["value"], errors="coerce")
+                if pd.notna(sentinel):
+                    values = values.mask(values == sentinel)
+                part = pd.DataFrame({
+                    "time": pd.to_datetime(data["dateTime"], utc=True, errors="coerce"),
+                    "column": col, "value": clean_values(values, col),
+                    "series": f"{item.get('name', col)} / group {number}",
+                }).dropna(subset=["time", "value"])
+                if not part.empty:
+                    parts.append(part)
+    except Exception as exc:
+        failures.append(f"Legacy API: {type(exc).__name__}: {exc}")
+    present = set(pd.concat(parts)["column"]) if parts else set()
+    for code, col in mapping.items():
+        if col in present:
+            continue
+        url = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/continuous/items"
+        params = {"f": "json", "monitoring_location_id": f"USGS-{site}", "parameter_code": code, "time": f"P{days}D", "limit": 10000}
+        seen, pages = set(), []
+        try:
+            while url:
+                response = requests.get(url, params=params, timeout=(10, 45), headers={"User-Agent": "AquaSentry/1.3"})
+                response.raise_for_status()
+                if response.url in seen:
+                    raise ValueError("Repeated pagination URL; partial series discarded.")
+                seen.add(response.url)
+                payload = response.json()
+                rows = []
+                for feature in payload.get("features", []):
+                    props = feature.get("properties", {})
+                    if props.get("monitoring_location_id") != f"USGS-{site}" or str(props.get("parameter_code")) != code:
+                        continue
+                    rows.append({"time": props.get("time"), "value": props.get("value"), "column": col, "series": f"USGS time series {props.get('time_series_id', 'unknown')}"})
+                if rows:
+                    pages.append(pd.DataFrame(rows))
+                link = next((entry.get("href") for entry in payload.get("links", []) if entry.get("rel") == "next"), None)
+                url = urljoin(response.url, link) if link else None
+                params = None
+                if len(seen) > 100:
+                    raise ValueError("Pagination safety limit reached; partial series discarded.")
+            if pages:
+                part = pd.concat(pages, ignore_index=True)
+                part["time"] = pd.to_datetime(part["time"], utc=True, errors="coerce")
+                part["value"] = clean_values(pd.to_numeric(part["value"], errors="coerce").mask(lambda s: s.le(-99990)), col)
+                part = part.dropna(subset=["time", "value"])
+                if not part.empty:
+                    parts.append(part)
+        except Exception as exc:
+            if col != "salinity_PSU":
+                failures.append(f"Modern API {code}: {type(exc).__name__}: {exc}")
     if not parts:
-        raise ValueError("USGS returned no supported water-quality observations.")
-    return pd.concat(parts, ignore_index=True), names[0] if names else f"USGS {site}"
+        raise ValueError("No supported observations returned. " + " | ".join(failures))
+    result = pd.concat(parts, ignore_index=True).drop_duplicates(["time", "column", "series"], keep="last")
+    result.attrs["retrieved_at_utc"] = pd.Timestamp.now(tz="UTC").isoformat()
+    result.attrs["provider_warnings"] = failures
+    fallback_name = next((label.split(" — ")[0] for label, config in STATIONS.items() if config["id"] == site), f"USGS {site}")
+    return result, names[0] if names else fallback_name
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -265,9 +364,14 @@ def select_sensor_series(records, station):
             selected = st.selectbox(label, choices, key=f"sensor_{station}_{meta['key']}") if len(choices) > 1 else choices[0]
             part = group.loc[group["series"].eq(selected)].groupby("time")["value"].median()
             parts.append(part.rename(meta["column"]))
+    auxiliary = records.loc[records["column"].eq("salinity_PSU")]
+    if auxiliary["series"].nunique() == 1:
+        parts.append(auxiliary.groupby("time")["value"].median().rename("salinity_PSU"))
     if not parts:
-        raise ValueError("No usable selected sensor series.")
-    return pd.concat(parts, axis=1).sort_index().reindex(columns=VALUE_COLUMNS)
+        raise ValueError("No usable sensor series.")
+    result = pd.concat(parts, axis=1).sort_index().reindex(columns=VALUE_COLUMNS)
+    result.attrs.update(records.attrs)
+    return result
 
 
 def interpolate_history(history, sources, max_gap=INTERPOLATION_MAX_GAP_HOURS):
@@ -292,7 +396,7 @@ def hourly_history(raw, provider, noaa_station):
     hourly = hourly.loc[hourly.index < pd.Timestamp.now(tz="UTC").floor("h")]
     sources = pd.DataFrame("Missing", index=hourly.index, columns=VALUE_COLUMNS).mask(hourly.notna(), provider)
     notes = {}
-    for col, product in [("temp_C", "water_temperature"), ("salinity_PSU", "salinity")]:
+    for col, product in [("temp_C", "water_temperature")]:
         filled = 0
         if noaa_station.strip() and hourly[col].isna().any():
             try:
@@ -313,8 +417,12 @@ def hourly_history(raw, provider, noaa_station):
 
 
 def asset_signature():
-    paths = sorted(MODEL_ROOT.rglob("*.json")) + sorted(MODEL_ROOT.rglob("*.csv"))
-    return tuple((str(p.relative_to(ROOT)), p.stat().st_size, p.stat().st_mtime_ns) for p in paths)
+    paths = []
+    for meta in VARIABLES.values():
+        folder = MODEL_ROOT / meta["folder"]
+        paths.extend(folder.glob("*.json"))
+        paths.extend(folder.glob("*.csv"))
+    return tuple((str(p.relative_to(ROOT)), p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(paths))
 
 
 @st.cache_resource(show_spinner=False)
@@ -488,6 +596,8 @@ def make_forecast(history, sources, station, assets, adaptation):
     if available.empty:
         raise ValueError("No supported measurements are available. Interpolation cannot create an absent series.")
     origin = available.index[-1]
+    if pd.Timestamp.now(tz="UTC") - (origin + pd.Timedelta(hours=1)) > pd.Timedelta(hours=FRESHNESS_HOURS):
+        raise ValueError("Latest completed observation hour is delayed by more than three hours. History remains visible; a current forecast is withheld.")
     features = make_features(history, origin)
     water_columns = [col for col in FEATURE_COLUMNS if col not in ("hour", "month")]
     if not np.isfinite(features[water_columns].to_numpy()).any():
@@ -497,6 +607,8 @@ def make_forecast(history, sources, station, assets, adaptation):
     for label, meta in VARIABLES.items():
         key, col = meta["key"], meta["column"]
         baseline = float(history.at[origin, col])
+        if not np.isfinite(baseline):
+            continue
         for horizon in range(1, 25):
             method = effective_method(key, assets[1][key], assets[2][key], station, horizon)
             try:
@@ -525,46 +637,52 @@ def make_forecast(history, sources, station, assets, adaptation):
     return pd.DataFrame(rows)
 
 
-def get_forecast(history, sources, station, assets, signature, adaptation_enabled):
+@st.cache_data(ttl=900, show_spinner=False)
+def get_forecast(history, sources, station, _assets, signature, adaptation_enabled):
     adaptation, issue = {}, None
     if adaptation_enabled:
         try:
-            adaptation = build_station_adaptation(history, sources, station, signature, PIPELINE_VERSION, assets)
+            adaptation = build_station_adaptation(history, sources, station, signature, PIPELINE_VERSION, _assets)
         except Exception as exc:
             issue = f"Station adjustment unavailable; base forecasts remain active: {exc}"
-    return make_forecast(history, sources, station, assets, adaptation), adaptation, issue
+    forecast = make_forecast(history, sources, station, _assets, adaptation)
+    forecast.attrs["generated_at_utc"] = pd.Timestamp.now(tz="UTC").isoformat()
+    return forecast, adaptation, issue
 
 
 def draw_forecast(history, forecast, hours, sources):
     origin = forecast.origin.iloc[0]
     start, end = origin - pd.Timedelta(hours=hours), origin + pd.Timedelta(hours=24)
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.075, subplot_titles=[f'{label} · {meta["unit"]}' for label, meta in VARIABLES.items()])
-    has_corrections = forecast.station_correction.abs().gt(1e-9).any()
-    legend_shown = set()
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.10, subplot_titles=[f'{label} · {meta["unit"]}' for label, meta in VARIABLES.items()])
+    shown = set()
     for row, (label, meta) in enumerate(VARIABLES.items(), 1):
-        observed = history.loc[(history.index >= start) & (history.index <= end), meta["column"]]
-        subset = forecast[forecast.variable == meta["key"]].sort_values("horizon")
-        unit = "" if meta["key"] == "ph" else " " + meta["unit"]
+        observed = history.loc[(history.index >= start) & (history.index <= origin), meta["column"]]
+        subset = forecast.loc[forecast.variable.eq(meta["key"])].sort_values("horizon")
         provenance = sources[meta["column"]].reindex(observed.index).fillna("Missing")
-        fig.add_trace(go.Scatter(x=observed.index, y=observed, mode="lines", connectgaps=False, name="Hourly history", legendgroup="observed", showlegend=row == 1, line=dict(color="#246fba", width=2.8), customdata=provenance.to_numpy(), hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}" + unit + "<br>%{customdata}<extra>History</extra>"), row=row, col=1)
-        interpolated = provenance.astype(str).str.startswith("Interpolated")
-        if interpolated.any():
-            fig.add_trace(go.Scatter(x=observed.index[interpolated], y=observed.loc[interpolated], mode="markers", name="Interpolated estimate", legendgroup="interpolated", showlegend="interpolated" not in legend_shown, marker=dict(size=7, symbol="diamond-open", color="#d78c1e"), hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}" + unit + "<extra>Interpolated, not measured</extra>"), row=row, col=1)
-            legend_shown.add("interpolated")
+        details = np.array([[format_time(t), str(p)] for t, p in zip(observed.index, provenance)], dtype=object).reshape(-1, 2)
+        unit = "" if meta["key"] == "ph" else " " + meta["unit"]
+        fig.add_trace(go.Scatter(x=observed.index, y=observed, mode="lines", connectgaps=False, name="Completed hourly history", legendgroup="history", showlegend=row == 1, line=dict(color="#246fba", width=2.8), customdata=details, hovertemplate="%{customdata[0]}<br>%{y:.2f}" + unit + "<br>%{customdata[1]}<extra>History</extra>"), row=row, col=1)
+        mask = provenance.astype(str).str.startswith("Interpolated")
+        if mask.any():
+            fig.add_trace(go.Scatter(x=observed.index[mask], y=observed.loc[mask], mode="markers", name="Interpolated estimate", legendgroup="interpolation", showlegend="interpolation" not in shown, marker=dict(size=7, symbol="diamond-open", color="#d78c1e"), customdata=[[format_time(t)] for t in observed.index[mask]], hovertemplate="%{customdata[0]}<br>%{y:.2f}" + unit + "<extra>Interpolated, not measured</extra>"), row=row, col=1)
+            shown.add("interpolation")
         if subset.empty:
             continue
-        if has_corrections:
-            fig.add_trace(go.Scatter(x=subset.timestamp, y=subset.original_prediction, mode="lines", name="Before station adjustment", legendgroup="base", showlegend="base" not in legend_shown, line=dict(color="#9aaec2", width=1.6, dash="dot"), hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}" + unit + "<extra>Before adjustment</extra>"), row=row, col=1)
-            legend_shown.add("base")
-        fig.add_trace(go.Scatter(x=subset.timestamp, y=subset.prediction, mode="lines+markers", name="Forecast", legendgroup="forecast", showlegend="forecast" not in legend_shown, customdata=subset[["method_source", "station_correction", "adaptation_examples"]].to_numpy(), line=dict(color="#16a394", width=2.8, dash="dash"), marker=dict(size=4, color="#16a394"), hovertemplate="%{x|%b %d %H:%M} UTC<br>%{y:.2f}" + unit + "<br>%{customdata[0]}<br>Adjustment: %{customdata[1]:+.3f}<extra>Forecast</extra>"), row=row, col=1)
-        legend_shown.add("forecast")
+        if subset.station_correction.abs().gt(1e-9).any():
+            fig.add_trace(go.Scatter(x=subset.timestamp, y=subset.original_prediction, mode="lines", name="Before station adjustment", legendgroup="base", showlegend="base" not in shown, line=dict(color="#9aaec2", width=1.6, dash="dot"), customdata=[[format_time(t)] for t in subset.timestamp], hovertemplate="%{customdata[0]}<br>%{y:.2f}" + unit + "<extra>Before adjustment</extra>"), row=row, col=1)
+            shown.add("base")
+        custom = [[format_time(t), method, correction] for t, method, correction in zip(subset.timestamp, subset.method_source, subset.station_correction)]
+        fig.add_trace(go.Scatter(x=subset.timestamp, y=subset.prediction, mode="lines+markers", name="Forecast", legendgroup="forecast", showlegend="forecast" not in shown, customdata=custom, line=dict(color="#16a394", width=2.8, dash="dash"), marker=dict(size=4), hovertemplate="%{customdata[0]}<br>%{y:.2f}" + unit + "<br>%{customdata[1]}<br>Adjustment: %{customdata[2]:+.3f}<extra>Forecast</extra>"), row=row, col=1)
+        shown.add("forecast")
     fig.add_vrect(x0=origin, x1=end, fillcolor="#246fba", opacity=.035, line_width=0)
     fig.add_vline(x=origin, line_dash="dot", line_color="#95a9bb", line_width=1.4)
-    fig.add_annotation(x=origin, y=1.065, xref="x", yref="paper", text="FORECAST START", showarrow=False, font=dict(size=10, color="#70869a"))
-    fig.update_xaxes(range=[start, end], showline=False, zeroline=False, gridcolor="#edf2f7", tickfont=dict(size=11, color="#70869a"))
-    fig.update_xaxes(title_text="Time (UTC)", row=4, col=1)
+    fig.add_annotation(x=origin, y=1.07, xref="x", yref="paper", text="FORECAST REFERENCE HOUR", showarrow=False, font=dict(size=10, color="#70869a"))
+    ticks = pd.date_range(start.ceil("6h"), end, freq="6h")
+    ticktext = [t.tz_convert(DISPLAY_TZ).strftime("%b %d<br>%H:%M %Z") for t in ticks]
+    fig.update_xaxes(range=[start, end], tickmode="array", tickvals=list(ticks), ticktext=ticktext, showline=False, zeroline=False, gridcolor="#edf2f7", tickfont=dict(size=11, color="#70869a"))
+    fig.update_xaxes(title_text=f"Time · {DISPLAY_TZ}", row=3, col=1)
     fig.update_yaxes(showline=False, zeroline=False, gridcolor="#edf2f7", tickfont=dict(size=11, color="#70869a"), nticks=5)
-    fig.update_layout(height=940, hovermode="x unified", template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff", font=dict(family="DM Sans, sans-serif", color="#34556f", size=12), hoverlabel=dict(bgcolor="#ffffff", bordercolor="#dce7f2", font=dict(family="DM Sans, sans-serif", color="#214a6b", size=13)), legend=dict(orientation="h", y=1.12, x=0, title_text=""), margin=dict(l=55, r=20, t=110, b=45))
+    fig.update_layout(height=790, hovermode="x unified", template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff", font=dict(family="DM Sans, sans-serif", color="#34556f", size=12), legend=dict(orientation="h", y=1.15, x=0), margin=dict(l=55, r=20, t=120, b=45))
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "displayModeBar": False})
 
 
@@ -585,7 +703,7 @@ def show_adjustment_details(adaptation, forecast, enabled):
         if details:
             st.caption("Corrections require at least 12 training and 6 later validation examples, with overlapping future training labels excluded. Historical interpolation is excluded from this check. Corrections are only applied to complete, non-interpolated forecast inputs. This is an internal check, not independent validation.")
             st.dataframe(pd.DataFrame(details), use_container_width=True, hide_index=True)
-        st.dataframe(forecast.drop(columns="variable"), use_container_width=True, hide_index=True)
+        st.dataframe(display_frame(forecast.drop(columns="variable")), use_container_width=True, hide_index=True)
 
 
 def show_data_sources(history, sources, notes, issues, expanded=False):
@@ -593,16 +711,13 @@ def show_data_sources(history, sources, notes, issues, expanded=False):
         rows = []
         for label, meta in VARIABLES.items():
             series = history[meta["column"]].dropna()
-            time = series.index[-1] if not series.empty else None
-            rows.append({"Parameter": label, "Latest hourly reading (UTC)": str(time) if time is not None else "Unavailable", "Source": sources.at[time, meta["column"]] if time is not None else "Missing", "Hourly observations / estimates": len(series), "Notes": notes.get(meta["column"], "Direct provider measurements")})
+            timestamp = series.index[-1] if len(series) else None
+            rows.append({"Parameter": label, "Latest hourly bin start": format_time(timestamp), "Source": sources.at[timestamp, meta["column"]] if timestamp is not None else "Missing", "Hourly observations / estimates": len(series), "Notes": notes.get(meta["column"], "Direct provider measurements")})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.caption("Completed hourly medians are labeled by hour start. Internal gaps of at most three hourly bins may use time interpolation, explicitly labeled as estimates. Entirely absent series and leading/trailing gaps are not filled. No forward filling or extrapolation is used.")
-        if not history.empty:
-            row = make_features(history, history.index[-1]).iloc[0]
-            missing = row.index[~np.isfinite(row.to_numpy(dtype=float))].tolist()
-            st.write("Missing inputs for the latest hour:", ", ".join(missing) if missing else "None")
-        st.caption("The original 22-feature schema is retained. Unresolved inputs remain NaN for selected XGBoost models. Models are not retrained, and accuracy under missing-input patterns or geographic transfer has not been independently established. Salinity remains persistence-only. No calibrated uncertainty or hypoxia-event classifier is implemented.")
-        st.caption("Provisional observations may be revised. NOAA fallback uses the manually supplied station and must be appropriate for this location. Separate sensor series are not automatically combined. Worldwide locations marked setup required are not connected feeds.")
+        st.caption("Hourly medians are labeled by hour start, not by the exact instant of the last sample. Only completed hours enter forecasting. Internal gaps of at most three hours may be interpolated and are marked as estimates; absent series and trailing gaps are never fabricated.")
+        st.caption("Existing regression models retain their trained 22-feature input schema. Salinity is not displayed or forecast and no salinity model is loaded. If unambiguous measured salinity exists, it is retained only as a legacy predictor for the remaining models; otherwise its input slots remain NaN. This is not a retrained salinity-free model.")
+        st.caption("Station adjustment is a regression-bias correction checked on later historical examples. It is not the experimental hypoxia-threshold adaptation mechanism and does not establish calibrated hypoxia probabilities. No hypoxia percentage is fabricated from these regression forecasts.")
+        st.caption("Provisional data may be revised. A fresh feed is not proof of sensor accuracy or forecast skill. Display timezone changes do not change model inputs, UTC feature hours, or forecast values.")
         if issues:
             st.write("Model asset issues:")
             st.code("\n".join(issues))
@@ -610,16 +725,16 @@ def show_data_sources(history, sources, notes, issues, expanded=False):
     for label, meta in VARIABLES.items():
         col = meta["column"]
         mask = sources[col].astype(str).str.startswith("Interpolated")
-        for time in sources.index[mask]:
-            audit.append({"Parameter": label, "Hourly bin (UTC)": time, "Estimated value": history.at[time, col], "Source": sources.at[time, col]})
+        for timestamp in sources.index[mask]:
+            audit.append({"Parameter": label, "Hourly bin start": format_time(timestamp), "Hourly bin start UTC": timestamp.isoformat(), "Estimated value": history.at[timestamp, col], "Source": sources.at[timestamp, col]})
     with st.expander("Interpolation audit"):
         if audit:
             frame = pd.DataFrame(audit)
-            st.warning(f"{len(frame)} hourly history values are interpolated estimates, not measured observations.")
+            st.warning(f"{len(frame)} displayed hourly values are interpolated estimates, not recorded measurements.")
             st.dataframe(frame, use_container_width=True, hide_index=True)
             st.download_button("Download interpolation audit CSV", frame.to_csv(index=False).encode("utf-8"), file_name="aquasentry_interpolation_audit.csv", mime="text/csv")
         else:
-            st.write("No hourly history values were interpolated.")
+            st.write("No displayed hourly history values were interpolated.")
 
 
 def show_brand_banner():
@@ -631,65 +746,52 @@ def show_brand_banner():
             logo_html = '<img class="brand-logo" src="data:image/png;base64,' + encoded_logo + '" alt="AquaSentry logo">'
         except OSError:
             logo_html = ""
-    st.markdown('<div class="hero">' + logo_html + '<div><h1>AquaSentry</h1><p>Predict hypoxia. Prevent hypoxia. Protect marine life.</p></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero">' + logo_html + '<div><h1>AquaSentry</h1><p>Monitor water quality. Explore forecasts. Support aquatic research.</p></div></div>', unsafe_allow_html=True)
 
 
 def load_selected_station(config):
     station = config["id"]
-    if config["provider"] == "usgs":
-        if not re.fullmatch(r"\d{8}(\d{7})?", station):
-            st.info("Select a station or enter an 8- or 15-digit USGS station ID.")
-            return None
-        records, name = fetch_usgs(station)
-        return records, name, "USGS Direct"
-    st.warning("Experimental Mace Head adapter: raw provider observations are not fully quality controlled. Recent availability and supported units are checked when requested. Local forecast performance has not been validated.")
-    attrs = erddap_metadata(config["server"], station)
-    selections = {}
-    with st.sidebar.expander("Mace Head sensor selection", expanded=True):
-        depth = st.number_input("Exact published sensor depth (m)", min_value=0.0, value=0.0)
-        for col, standard in [("temp_C", "sea_water_temperature"), ("salinity_PSU", "sea_water_practical_salinity"), ("DO_mgL", "oxygen")]:
-            candidates = []
-            for field, attributes in attrs.items():
-                std = str(attributes.get("standard_name", ""))
-                matches = "oxygen" in std if col == "DO_mgL" else std == standard
-                if matches and erddap_factor(col, attributes) is not None:
-                    candidates.append(field)
-            if candidates:
-                selected = st.selectbox(col, ["Not selected"] + sorted(candidates))
-                if selected != "Not selected":
-                    selections[col] = selected
-        st.caption("Choose one sensor per parameter. pH remains unavailable until its scale is reconciled with the training data.")
-    if not selections:
-        st.info("Select at least one supported sensor in the sidebar.")
+    if not re.fullmatch(r"\d{8,15}", station):
+        st.info("Select a station or enter an 8- to 15-digit USGS station ID.")
         return None
-    records, name = fetch_erddap(config["server"], station, selections, depth)
-    return records, name, "Marine Institute (experimental, raw)"
+    records, name = fetch_usgs(station)
+    return records, name, "USGS Direct"
 
 
 def main():
+    global DISPLAY_TZ
     st.markdown(STYLE, unsafe_allow_html=True)
     with st.sidebar:
         st.markdown("### Monitoring station")
         choice = st.selectbox("Select station", list(STATIONS), label_visibility="collapsed")
         config = dict(STATIONS[choice])
         if config["provider"] == "custom":
-            config = {"provider": "usgs", "id": st.text_input("USGS station ID").strip()}
+            config = {"provider": "usgs", "id": st.text_input("USGS station ID").strip(), "timezone": "UTC"}
         hours = st.selectbox("Chart history", [24, 48, 72], format_func=lambda value: f"Past {value} hours")
-        if st.button("Refresh data", use_container_width=True):
+        with st.expander("Settings"):
+            available = sorted(available_timezones())
+            choices = TIMEZONE_CHOICES + [zone for zone in available if zone not in TIMEZONE_CHOICES]
+            selected_tz = st.selectbox("Display timezone", choices, key="display_timezone_choice", help="Changes timestamps only. Computation and model feature hours stay in UTC; daylight saving is handled by the named timezone.")
+            DISPLAY_TZ = config.get("timezone", "UTC") if selected_tz == "Station local (automatic)" else selected_tz
+            st.caption(f"Active timezone: {DISPLAY_TZ}")
+            adaptation_enabled = st.checkbox("Station adjustment", value=True, key="station_adjustment_enabled", help="Apply regression-bias corrections only when they improve the existing historical validation check. This is not a hypoxia-probability classifier.")
+            noaa = st.text_input("Optional NOAA temperature fallback station", key="noaa_fallback_station", help="Use only a station demonstrably appropriate for this water body. This does not supply pH or dissolved oxygen.")
+        if st.button("Refresh data and forecast", use_container_width=True):
             fetch_usgs.clear()
             fetch_noaa.clear()
-            fetch_erddap.clear()
-            erddap_metadata.clear()
             build_station_adaptation.clear()
-        with st.expander("Settings"):
-            adaptation_enabled = st.checkbox("Station adjustment", value=True, key="station_adjustment_enabled", help="Apply station-specific corrections only when they improve historical validation results.")
-            noaa = st.text_input("NOAA fallback station", key="noaa_fallback_station", help="Optional temperature/salinity fallback. Its location must be appropriate for the selected station.")
+            get_forecast.clear()
+        check_all = st.button("Check all five station feeds", use_container_width=True)
     show_brand_banner()
-    if config["provider"] == "pending":
-        st.markdown('<div class="station-title">' + html.escape(choice.replace(" — setup required", "")) + '</div>', unsafe_allow_html=True)
-        st.info("This monitoring location is not connected yet. Its adapter, sensor/depth selection, unit checks, and freshness checks still need implementation. No measurements or forecasts are fabricated.")
-        st.link_button("Open monitoring program", config["url"])
-        return
+    st.caption("Research forecasts of dissolved oxygen, water temperature, and pH. Station-specific hypoxia probabilities are not yet deployed.")
+    if check_all:
+        with st.spinner("Checking current parameter availability at all five stations…"):
+            st.session_state["station_feed_health"] = check_default_stations()
+            st.session_state["station_feed_health_checked_at"] = pd.Timestamp.now(tz="UTC").isoformat()
+    if "station_feed_health" in st.session_state:
+        with st.expander("Five-station feed check", expanded=check_all):
+            st.caption("Checked " + format_time(st.session_state["station_feed_health_checked_at"]) + ". Freshness is not a sensor-accuracy guarantee. Select a station to inspect individual series.")
+            st.dataframe(st.session_state["station_feed_health"], use_container_width=True, hide_index=True)
     station = config["id"].strip()
     try:
         with st.spinner("Loading station data…"):
@@ -699,41 +801,38 @@ def main():
             records, name, provider = loaded
             raw = select_sensor_series(records, station)
             history, sources, notes = hourly_history(raw, provider, noaa)
-        if history.dropna(how="all").empty:
+        if history[[meta["column"] for meta in VARIABLES.values()]].dropna(how="all").empty:
             raise ValueError("No supported completed hourly observations are available.")
     except Exception as exc:
         st.error(f"Could not load station data: {exc}")
+        st.info("An unavailable feed is not replaced with fabricated readings. Try Refresh or another station.")
         return
     st.markdown('<div class="station-id">' + html.escape(provider) + ' ' + html.escape(station) + '</div><div class="station-title">' + html.escape(name) + '</div>', unsafe_allow_html=True)
-    st.caption("Latest hourly readings · All times UTC")
-    now = pd.Timestamp.now(tz="UTC")
-    for box, (label, meta) in zip(st.columns(4), VARIABLES.items()):
+    st.caption(f"Latest completed hourly readings · {DISPLAY_TZ}")
+    for box, (label, meta) in zip(st.columns(3), VARIABLES.items()):
         series = history[meta["column"]].dropna()
         with box:
             if series.empty:
                 st.metric(label, "Unavailable")
-                st.caption("No recent reading")
+                st.caption("No supported reading")
                 continue
-            time, value = series.index[-1], float(series.iloc[-1])
-            prior = series.get(time - pd.Timedelta(hours=24), np.nan)
+            timestamp, value = series.index[-1], float(series.iloc[-1])
+            prior = series.get(timestamp - pd.Timedelta(hours=24), np.nan)
             unit = "" if meta["key"] == "ph" else " " + meta["unit"]
             change = value - float(prior) if pd.notna(prior) else None
-            if change is not None and abs(change) < .005:
-                change = 0.0
-            delta = f"{change:+.2f}{unit} vs yesterday" if change is not None and change != 0 else None
-            st.metric(label, f"{value:.2f}{unit}", delta=delta, delta_color="normal")
-            if change == 0.0:
-                st.caption("No change vs yesterday")
-            st.caption(f'{sources.at[time, meta["column"]]} · {time:%b %d, %H:%M} UTC')
-            if now - (time + pd.Timedelta(hours=1)) > pd.Timedelta(hours=3):
-                st.caption("Reading delayed")
-    st.caption("Salinity forecast: held constant while its prediction models are improved.")
-    forecast, adaptation = None, {}
-    assets = None
+            delta = f"{change:+.2f}{unit} vs 24 h earlier" if change is not None and abs(change) >= .005 else None
+            st.metric(label, f"{value:.2f}{unit}", delta=delta)
+            st.caption(f'{sources.at[timestamp, meta["column"]]} · hour starting {format_time(timestamp)}')
+    with st.expander("Observation freshness and coverage", expanded=False):
+        st.caption("Raw observations, before interpolation. Coverage counts hours with at least one selected sample; it is not a laboratory quality assessment.")
+        st.dataframe(observation_health(raw), use_container_width=True, hide_index=True)
+        st.caption("Provider response retrieved: " + format_time(records.attrs.get("retrieved_at_utc")))
+        for warning in records.attrs.get("provider_warnings", []):
+            st.caption(warning)
+    forecast, adaptation, assets = None, {}, None
     try:
         signature = asset_signature()
-        message = "Updating forecast and station adjustment…" if adaptation_enabled else "Updating forecast…"
-        with st.spinner(message):
+        with st.spinner("Preparing forecast and station adjustment…"):
             assets = load_assets(signature)
             forecast, adaptation, issue = get_forecast(history, sources, station, assets, signature, adaptation_enabled)
         if issue:
@@ -742,28 +841,33 @@ def main():
         st.warning(f"Forecast unavailable: {exc}")
     if forecast is not None:
         origin = forecast.origin.iloc[0]
-        age = max(0.0, (now - (origin + pd.Timedelta(hours=1))).total_seconds() / 3600)
+        generated = forecast.attrs.get("generated_at_utc")
+        now = pd.Timestamp.now(tz="UTC")
         st.markdown("### Water-quality forecast")
-        a, b, c = st.columns(3)
-        a.metric("Forecast starts", origin.strftime("%b %d · %H:%M"))
-        b.metric("Time since forecast data", f"{age:.1f} h")
-        c.metric("Station adjustment", "On" if adaptation_enabled else "Off")
-        if age > 3:
-            st.warning("Data is delayed. This forecast starts from the displayed older origin, not from now.")
+        st.write("Last forecast generated: " + format_time(generated))
+        st.write("Forecast reference hour starts: " + format_time(origin))
+        st.caption("The reference is the start label of the latest completed hourly-median bin, not the current wall-clock time. That bin ends at " + format_time(origin + pd.Timedelta(hours=1)) + ".")
+        st.write("Prediction target times: " + format_time(forecast.timestamp.min()) + " through " + format_time(forecast.timestamp.max()))
+        upcoming = forecast.loc[forecast.timestamp.gt(now)]
+        if upcoming.empty:
+            st.warning("No targets in this forecast are still in the future. Refresh the provider data.")
+        else:
+            target = upcoming.timestamp.min()
+            current_table = upcoming.loc[upcoming.timestamp.eq(target), ["label", "prediction", "method_source"]].rename(columns={"label": "Parameter", "prediction": "Forecast value", "method_source": "Method"})
+            st.write("Next future prediction target: " + format_time(target))
+            st.dataframe(current_table, use_container_width=True, hide_index=True)
         missing = forecast.missing_inputs.iloc[0]
         estimated = forecast.interpolated_inputs.iloc[0]
         if missing:
-            st.info("Some inputs are unavailable and remain NaN. Selected XGBoost models still run with partial inputs. Missing: " + missing)
+            st.info("Selected models are running with some NaN legacy inputs; local skill for this pattern is unverified. Missing: " + missing)
         if estimated:
-            st.warning("Measurements were unavailable for some inputs. Interpolation was used for: " + estimated + ". These values are estimates, not recorded readings.")
-        elif sources.apply(lambda col: col.astype(str).str.startswith("Interpolated")).to_numpy().any():
-            st.caption("Some historical values are interpolated estimates. See the marked chart points and interpolation audit.")
+            st.warning("Interpolated estimates are used for some inputs: " + estimated)
         omitted = [label for label, meta in VARIABLES.items() if meta["key"] not in set(forecast.variable)]
         if omitted:
-            st.caption("No usable forecast for: " + ", ".join(omitted) + ". Other parameters continue.")
+            st.caption("No current supported forecast for: " + ", ".join(omitted))
         draw_forecast(history, forecast, hours, sources)
-        st.caption("Solid line: hourly history · Open diamonds: interpolated estimates · Dashed line: forecast")
-        st.download_button("Download forecast CSV", forecast.to_csv(index=False).encode("utf-8"), file_name=f"aquasentry_{station}_forecast.csv", mime="text/csv", use_container_width=True)
+        st.caption("Solid: completed hourly history · Open diamonds: interpolated estimates · Dashed: forecast · Full timestamps and UTC offsets appear on hover.")
+        st.download_button("Download forecast CSV", export_forecast(forecast).to_csv(index=False).encode("utf-8"), file_name=f"aquasentry_{station}_forecast.csv", mime="text/csv", use_container_width=True)
         show_adjustment_details(adaptation, forecast, adaptation_enabled)
     show_data_sources(history, sources, notes, assets[3] if assets is not None else [], expanded=forecast is None)
     st.markdown('<div class="footer">AquaSentry · Research forecasting dashboard</div>', unsafe_allow_html=True)
