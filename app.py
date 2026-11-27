@@ -308,7 +308,7 @@ def fetch_usgs(site, days=90, source_choice="Legacy + current (auto)"):
     records.attrs["retrieved_at_utc"] = pd.Timestamp.now(tz="UTC").isoformat()
     records.attrs["provider_warnings"] = warnings
     fallback_name = next((label.split(" — ")[0] for label, config in STATIONS.items() if config["id"] == site), f"USGS {site}")
-        return records, names[0] if names else fallback_name
+    return records, names[0] if names else fallback_name
 
 
 def pick_newest_series(records):
